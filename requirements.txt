@@ -11,3 +11,4 @@ pandas
 matplotlib
 requests
 scikit-learn
+reportlab
