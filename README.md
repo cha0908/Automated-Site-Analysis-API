@@ -268,7 +268,7 @@ POST `/report`
 
 ---
 
-# ⚙ Optimization Strategy
+# Optimization Strategy
 
 ### Dataset Reduction
 - Buildings reduced from 342,000+ rows → 42,000
