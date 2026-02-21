@@ -36,17 +36,20 @@ DATA_DIR = os.path.join(BASE_DIR, "data")
 ZONE_PATH = os.path.join(DATA_DIR, "ZONE_REDUCED.gpkg")
 BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")
 
-print("Loading zoning dataset...")
-ZONE_DATA = gpd.read_file(ZONE_PATH).to_crs(3857)
-
 print("Loading building height dataset...")
+
 BUILDING_DATA = gpd.read_file(BUILDINGS_PATH).to_crs(3857)
-BUILDING_DATA["HEIGHT_M"] = (
-    BUILDING_DATA["TopHeight"] - BUILDING_DATA["BaseHeight"]
-)
+
+# Validate required column
+if "HEIGHT_M" not in BUILDING_DATA.columns:
+    raise ValueError(
+        f"HEIGHT_M column not found. Available columns: {BUILDING_DATA.columns}"
+    )
+
+# Filter valid buildings
 BUILDING_DATA = BUILDING_DATA[BUILDING_DATA["HEIGHT_M"] > 5]
 
-print("Startup complete.")
+print("Building dataset loaded successfully.")
 
 
 # -----------------------------------------------------
