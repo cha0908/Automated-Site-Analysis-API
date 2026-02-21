@@ -1,1 +1,13 @@
-
+fastapi
+uvicorn
+geopandas
+osmnx
+contextily
+shapely
+pyproj
+networkx
+numpy
+pandas
+matplotlib
+requests
+scikit-learn
