@@ -5,14 +5,6 @@
 <h1 style="margin-top:0;">
 AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+
 </h1>
-
-<p>
-<b>ALKF+</b><br>
-Automated Geospatial Intelligence Microservice<br>
-Urban Feasibility • Accessibility • Environmental Noise • 360° View Analysis<br>
-Production-Ready Cloud-Deployed GIS Engine
-</p>
-
 <br clear="left"/>
 <hr>
 
