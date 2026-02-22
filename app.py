@@ -10,7 +10,7 @@ import hashlib
 from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
-
+from fastapi.middleware.cors import CORSMiddleware
 # -----------------------------------------------------
 # IMPORT MODULES
 # -----------------------------------------------------
@@ -29,6 +29,18 @@ from modules.noise import generate_noise
 app = FastAPI(
     title="Automated Site Analysis API",
     version="2.0"
+)
+
+# -----------------------------------------------------
+# CORS CONFIGURATION (ALLOW ALL ORIGINS)
+# -----------------------------------------------------
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],      # Allow all domains
+    allow_credentials=False,  # Must be False when using "*"
+    allow_methods=["*"],      # Allow all HTTP methods
+    allow_headers=["*"],      # Allow all headers
 )
 
 # -----------------------------------------------------
