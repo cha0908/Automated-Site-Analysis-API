@@ -5,7 +5,6 @@
 <h1 style="margin-top:0;">
 AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+
 </h1>
-<br clear="left"/>
 <hr>
 
 # Executive Overview
