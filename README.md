@@ -1,4 +1,4 @@
-# AUTOAMTED SPATIAL INTELLIGENCE SYSTEM API – ALKF
+# AUTOAMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF
 
 > Automated Geospatial Intelligence Microservice  
 > Urban Feasibility • Accessibility • Environmental Noise • 360° View Analysis  
