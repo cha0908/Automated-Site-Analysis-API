@@ -1,26 +1,20 @@
-<table>
-<tr>
-<td width="180" valign="top">
+<p>
+  <img src="images/alkf-logo.png" width="140" align="left">
+</p>
 
-<img src="images/alkf-logo.png" width="150"/>
+<h1 style="margin-top:0;">
+AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+
+</h1>
 
-</td>
-
-<td valign="top">
-
-<h1 style="margin:0;">AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+</h1>
-
-<p style="margin-top:10px;">
+<p>
 <b>ALKF+</b><br>
 Automated Geospatial Intelligence Microservice<br>
 Urban Feasibility • Accessibility • Environmental Noise • 360° View Analysis<br>
 Production-Ready Cloud-Deployed GIS Engine
 </p>
 
-</td>
-</tr>
-</table>
-
+<br clear="left"/>
+<hr>
 ---
 # Executive Overview
 
