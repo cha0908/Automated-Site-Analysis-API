@@ -1,0 +1,200 @@
+2026-02-22T12:26:53.121339358Z ==> Cloning from https://github.com/Sudharsanselvaraj/Automated-Site-Analysis-API
+2026-02-22T12:26:55.39587732Z ==> Checking out commit e3e9d372cfb99fef243590a510704f2bdd47049a in branch main
+2026-02-22T12:26:58.083079187Z ==> Installing Python version 3.14.3...
+2026-02-22T12:27:08.781898248Z ==> Using Python version 3.14.3 (default)
+2026-02-22T12:27:08.806538642Z ==> Docs on specifying a Python version: https://render.com/docs/python-version
+2026-02-22T12:27:12.184369951Z ==> Using Poetry version 2.1.3 (default)
+2026-02-22T12:27:12.243710605Z ==> Docs on specifying a Poetry version: https://render.com/docs/poetry-version
+2026-02-22T12:27:12.328929348Z ==> Running build command 'pip install -r requirements.txt'...
+2026-02-22T12:27:12.985820054Z Collecting fastapi (from -r requirements.txt (line 1))
+2026-02-22T12:27:13.081844381Z   Downloading fastapi-0.129.2-py3-none-any.whl.metadata (30 kB)
+2026-02-22T12:27:13.243939167Z Collecting uvicorn (from -r requirements.txt (line 2))
+2026-02-22T12:27:13.252577217Z   Downloading uvicorn-0.41.0-py3-none-any.whl.metadata (6.7 kB)
+2026-02-22T12:27:13.361170774Z Collecting geopandas (from -r requirements.txt (line 3))
+2026-02-22T12:27:13.375495889Z   Downloading geopandas-1.1.2-py3-none-any.whl.metadata (2.3 kB)
+2026-02-22T12:27:13.461205068Z Collecting osmnx (from -r requirements.txt (line 4))
+2026-02-22T12:27:13.471102374Z   Downloading osmnx-2.1.0-py3-none-any.whl.metadata (4.7 kB)
+2026-02-22T12:27:13.678259092Z Collecting contextily (from -r requirements.txt (line 5))
+2026-02-22T12:27:13.688942618Z   Downloading contextily-1.7.0-py3-none-any.whl.metadata (3.1 kB)
+2026-02-22T12:27:13.8923389Z Collecting shapely (from -r requirements.txt (line 6))
+2026-02-22T12:27:13.946570363Z   Downloading shapely-2.1.2-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (6.8 kB)
+2026-02-22T12:27:14.183893685Z Collecting pyproj (from -r requirements.txt (line 7))
+2026-02-22T12:27:14.202712672Z   Downloading pyproj-3.7.2-cp314-cp314-manylinux_2_28_x86_64.whl.metadata (31 kB)
+2026-02-22T12:27:14.303971859Z Collecting networkx (from -r requirements.txt (line 8))
+2026-02-22T12:27:14.3183842Z   Downloading networkx-3.6.1-py3-none-any.whl.metadata (6.8 kB)
+2026-02-22T12:27:14.605341412Z Collecting numpy (from -r requirements.txt (line 9))
+2026-02-22T12:27:14.61538832Z   Downloading numpy-2.4.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (6.6 kB)
+2026-02-22T12:27:14.749237525Z Collecting pandas (from -r requirements.txt (line 10))
+2026-02-22T12:27:14.75898293Z   Downloading pandas-3.0.1-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl.metadata (79 kB)
+2026-02-22T12:27:14.956661472Z Collecting matplotlib (from -r requirements.txt (line 11))
+2026-02-22T12:27:14.966607252Z   Downloading matplotlib-3.10.8-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (52 kB)
+2026-02-22T12:27:15.030489172Z Collecting requests (from -r requirements.txt (line 12))
+2026-02-22T12:27:15.039947955Z   Downloading requests-2.32.5-py3-none-any.whl.metadata (4.9 kB)
+2026-02-22T12:27:15.145727785Z Collecting scikit-learn (from -r requirements.txt (line 13))
+2026-02-22T12:27:15.158639221Z   Downloading scikit_learn-1.8.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (11 kB)
+2026-02-22T12:27:15.335452157Z Collecting reportlab (from -r requirements.txt (line 14))
+2026-02-22T12:27:15.344805022Z   Downloading reportlab-4.4.10-py3-none-any.whl.metadata (1.7 kB)
+2026-02-22T12:27:15.400149549Z Collecting starlette<1.0.0,>=0.40.0 (from fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.409599911Z   Downloading starlette-0.52.1-py3-none-any.whl.metadata (6.3 kB)
+2026-02-22T12:27:15.578836199Z Collecting pydantic>=2.7.0 (from fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.587548314Z   Downloading pydantic-2.12.5-py3-none-any.whl.metadata (90 kB)
+2026-02-22T12:27:15.633217583Z Collecting typing-extensions>=4.8.0 (from fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.64182429Z   Downloading typing_extensions-4.15.0-py3-none-any.whl.metadata (3.3 kB)
+2026-02-22T12:27:15.669435479Z Collecting typing-inspection>=0.4.2 (from fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.678114242Z   Downloading typing_inspection-0.4.2-py3-none-any.whl.metadata (2.6 kB)
+2026-02-22T12:27:15.704954383Z Collecting annotated-doc>=0.0.2 (from fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.713607584Z   Downloading annotated_doc-0.0.4-py3-none-any.whl.metadata (6.6 kB)
+2026-02-22T12:27:15.752008907Z Collecting anyio<5,>=3.6.2 (from starlette<1.0.0,>=0.40.0->fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.760624585Z   Downloading anyio-4.12.1-py3-none-any.whl.metadata (4.3 kB)
+2026-02-22T12:27:15.793328263Z Collecting idna>=2.8 (from anyio<5,>=3.6.2->starlette<1.0.0,>=0.40.0->fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:15.80192986Z   Downloading idna-3.11-py3-none-any.whl.metadata (8.4 kB)
+2026-02-22T12:27:15.839725487Z Collecting click>=7.0 (from uvicorn->-r requirements.txt (line 2))
+2026-02-22T12:27:15.848333705Z   Downloading click-8.3.1-py3-none-any.whl.metadata (2.6 kB)
+2026-02-22T12:27:15.881500858Z Collecting h11>=0.8 (from uvicorn->-r requirements.txt (line 2))
+2026-02-22T12:27:15.890593303Z   Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+2026-02-22T12:27:15.941708777Z Collecting pyogrio>=0.7.2 (from geopandas->-r requirements.txt (line 3))
+2026-02-22T12:27:15.951542299Z   Downloading pyogrio-0.12.1-cp314-cp314-manylinux_2_28_x86_64.whl.metadata (5.9 kB)
+2026-02-22T12:27:15.987338023Z Collecting packaging (from geopandas->-r requirements.txt (line 3))
+2026-02-22T12:27:15.996285726Z   Downloading packaging-26.0-py3-none-any.whl.metadata (3.3 kB)
+2026-02-22T12:27:16.080850205Z Collecting geopy (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.089900136Z   Downloading geopy-2.4.1-py3-none-any.whl.metadata (6.8 kB)
+2026-02-22T12:27:16.13354472Z Collecting mercantile (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.144372457Z   Downloading mercantile-1.2.1-py3-none-any.whl.metadata (4.8 kB)
+2026-02-22T12:27:16.359480956Z Collecting pillow (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.36948485Z   Downloading pillow-12.1.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (8.8 kB)
+2026-02-22T12:27:16.494573914Z Collecting rasterio (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.506132607Z   Downloading rasterio-1.5.0-cp314-cp314-manylinux_2_28_x86_64.whl.metadata (8.6 kB)
+2026-02-22T12:27:16.583898036Z Collecting joblib (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.593098409Z   Downloading joblib-1.5.3-py3-none-any.whl.metadata (5.5 kB)
+2026-02-22T12:27:16.618945963Z Collecting xyzservices (from contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:16.629670552Z   Downloading xyzservices-2025.11.0-py3-none-any.whl.metadata (4.3 kB)
+2026-02-22T12:27:16.667563016Z Collecting certifi (from pyproj->-r requirements.txt (line 7))
+2026-02-22T12:27:16.676222718Z   Downloading certifi-2026.1.4-py3-none-any.whl.metadata (2.5 kB)
+2026-02-22T12:27:16.711745071Z Collecting python-dateutil>=2.8.2 (from pandas->-r requirements.txt (line 10))
+2026-02-22T12:27:16.720607238Z   Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+2026-02-22T12:27:16.796661976Z Collecting contourpy>=1.0.1 (from matplotlib->-r requirements.txt (line 11))
+2026-02-22T12:27:16.806060414Z   Downloading contourpy-1.3.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (5.5 kB)
+2026-02-22T12:27:16.833471818Z Collecting cycler>=0.10 (from matplotlib->-r requirements.txt (line 11))
+2026-02-22T12:27:16.842201875Z   Downloading cycler-0.12.1-py3-none-any.whl.metadata (3.8 kB)
+2026-02-22T12:27:17.067377532Z Collecting fonttools>=4.22.0 (from matplotlib->-r requirements.txt (line 11))
+2026-02-22T12:27:17.077138097Z   Downloading fonttools-4.61.1-cp314-cp314-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl.metadata (114 kB)
+2026-02-22T12:27:17.184658959Z Collecting kiwisolver>=1.3.1 (from matplotlib->-r requirements.txt (line 11))
+2026-02-22T12:27:17.197759679Z   Downloading kiwisolver-1.4.9-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (6.3 kB)
+2026-02-22T12:27:17.253024039Z Collecting pyparsing>=3 (from matplotlib->-r requirements.txt (line 11))
+2026-02-22T12:27:17.262107643Z   Downloading pyparsing-3.3.2-py3-none-any.whl.metadata (5.8 kB)
+2026-02-22T12:27:17.35831559Z Collecting charset_normalizer<4,>=2 (from requests->-r requirements.txt (line 12))
+2026-02-22T12:27:17.367079679Z   Downloading charset_normalizer-3.4.4-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (37 kB)
+2026-02-22T12:27:17.412945012Z Collecting urllib3<3,>=1.21.1 (from requests->-r requirements.txt (line 12))
+2026-02-22T12:27:17.42169606Z   Downloading urllib3-2.6.3-py3-none-any.whl.metadata (6.9 kB)
+2026-02-22T12:27:17.572862774Z Collecting scipy>=1.10.0 (from scikit-learn->-r requirements.txt (line 13))
+2026-02-22T12:27:17.582218688Z   Downloading scipy-1.17.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl.metadata (62 kB)
+2026-02-22T12:27:17.617668756Z Collecting threadpoolctl>=3.2.0 (from scikit-learn->-r requirements.txt (line 13))
+2026-02-22T12:27:17.628529105Z   Downloading threadpoolctl-3.6.0-py3-none-any.whl.metadata (13 kB)
+2026-02-22T12:27:17.672782415Z Collecting annotated-types>=0.6.0 (from pydantic>=2.7.0->fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:17.681338398Z   Downloading annotated_types-0.7.0-py3-none-any.whl.metadata (15 kB)
+2026-02-22T12:27:18.48807163Z Collecting pydantic-core==2.41.5 (from pydantic>=2.7.0->fastapi->-r requirements.txt (line 1))
+2026-02-22T12:27:18.499051498Z   Downloading pydantic_core-2.41.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (7.3 kB)
+2026-02-22T12:27:18.543426237Z Collecting six>=1.5 (from python-dateutil>=2.8.2->pandas->-r requirements.txt (line 10))
+2026-02-22T12:27:18.553001138Z   Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+2026-02-22T12:27:18.601460968Z Collecting geographiclib<3,>=1.52 (from geopy->contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:18.610507109Z   Downloading geographiclib-2.1-py3-none-any.whl.metadata (1.6 kB)
+2026-02-22T12:27:18.649932309Z Collecting affine (from rasterio->contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:18.662314165Z   Downloading affine-2.4.0-py3-none-any.whl.metadata (4.0 kB)
+2026-02-22T12:27:18.695060785Z Collecting attrs (from rasterio->contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:18.704727533Z   Downloading attrs-25.4.0-py3-none-any.whl.metadata (10 kB)
+2026-02-22T12:27:18.745593574Z Collecting cligj>=0.5 (from rasterio->contextily->-r requirements.txt (line 5))
+2026-02-22T12:27:18.754984331Z   Downloading cligj-0.7.2-py3-none-any.whl.metadata (5.0 kB)
+2026-02-22T12:27:18.792627055Z Downloading fastapi-0.129.2-py3-none-any.whl (103 kB)
+2026-02-22T12:27:18.817611873Z Downloading starlette-0.52.1-py3-none-any.whl (74 kB)
+2026-02-22T12:27:18.836738593Z Downloading anyio-4.12.1-py3-none-any.whl (113 kB)
+2026-02-22T12:27:18.861703369Z Downloading uvicorn-0.41.0-py3-none-any.whl (68 kB)
+2026-02-22T12:27:18.881723748Z Downloading geopandas-1.1.2-py3-none-any.whl (341 kB)
+2026-02-22T12:27:18.92327577Z Downloading osmnx-2.1.0-py3-none-any.whl (104 kB)
+2026-02-22T12:27:18.947121101Z Downloading contextily-1.7.0-py3-none-any.whl (16 kB)
+2026-02-22T12:27:18.96439505Z Downloading shapely-2.1.2-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (3.1 MB)
+2026-02-22T12:27:19.111323578Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 3.1/3.1 MB 22.0 MB/s  0:00:00
+2026-02-22T12:27:19.12209649Z Downloading pyproj-3.7.2-cp314-cp314-manylinux_2_28_x86_64.whl (9.5 MB)
+2026-02-22T12:27:19.304591483Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.5/9.5 MB 53.5 MB/s  0:00:00
+2026-02-22T12:27:19.315299891Z Downloading networkx-3.6.1-py3-none-any.whl (2.1 MB)
+2026-02-22T12:27:19.351628314Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 55.4 MB/s  0:00:00
+2026-02-22T12:27:19.362696699Z Downloading numpy-2.4.2-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (16.6 MB)
+2026-02-22T12:27:19.534894016Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 16.6/16.6 MB 97.7 MB/s  0:00:00
+2026-02-22T12:27:19.54595463Z Downloading pandas-3.0.1-cp314-cp314-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl (10.9 MB)
+2026-02-22T12:27:19.623467878Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 10.9/10.9 MB 144.3 MB/s  0:00:00
+2026-02-22T12:27:19.633805577Z Downloading matplotlib-3.10.8-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (9.8 MB)
+2026-02-22T12:27:19.716142163Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 9.8/9.8 MB 126.9 MB/s  0:00:00
+2026-02-22T12:27:19.726265736Z Downloading requests-2.32.5-py3-none-any.whl (64 kB)
+2026-02-22T12:27:19.742542189Z Downloading charset_normalizer-3.4.4-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (152 kB)
+2026-02-22T12:27:19.760536142Z Downloading idna-3.11-py3-none-any.whl (71 kB)
+2026-02-22T12:27:19.77858369Z Downloading urllib3-2.6.3-py3-none-any.whl (131 kB)
+2026-02-22T12:27:19.799384558Z Downloading scikit_learn-1.8.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (8.9 MB)
+2026-02-22T12:27:19.868519536Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 8.9/8.9 MB 139.0 MB/s  0:00:00
+2026-02-22T12:27:19.879900275Z Downloading reportlab-4.4.10-py3-none-any.whl (2.0 MB)
+2026-02-22T12:27:19.902822775Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.0/2.0 MB 97.6 MB/s  0:00:00
+2026-02-22T12:27:19.912642825Z Downloading annotated_doc-0.0.4-py3-none-any.whl (5.3 kB)
+2026-02-22T12:27:19.929323238Z Downloading certifi-2026.1.4-py3-none-any.whl (152 kB)
+2026-02-22T12:27:19.946833125Z Downloading click-8.3.1-py3-none-any.whl (108 kB)
+2026-02-22T12:27:19.963560292Z Downloading contourpy-1.3.3-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (363 kB)
+2026-02-22T12:27:19.982621788Z Downloading cycler-0.12.1-py3-none-any.whl (8.3 kB)
+2026-02-22T12:27:19.998669333Z Downloading fonttools-4.61.1-cp314-cp314-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl (4.9 MB)
+2026-02-22T12:27:20.040621735Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.9/4.9 MB 120.1 MB/s  0:00:00
+2026-02-22T12:27:20.050461846Z Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+2026-02-22T12:27:20.066506471Z Downloading joblib-1.5.3-py3-none-any.whl (309 kB)
+2026-02-22T12:27:20.084990872Z Downloading kiwisolver-1.4.9-cp314-cp314-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (1.5 MB)
+2026-02-22T12:27:20.109642844Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 1.5/1.5 MB 61.6 MB/s  0:00:00
+2026-02-22T12:27:20.119240467Z Downloading packaging-26.0-py3-none-any.whl (74 kB)
+2026-02-22T12:27:20.138036851Z Downloading pillow-12.1.1-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (7.0 MB)
+2026-02-22T12:27:20.194383763Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 7.0/7.0 MB 127.7 MB/s  0:00:00
+2026-02-22T12:27:20.203815653Z Downloading pydantic-2.12.5-py3-none-any.whl (463 kB)
+2026-02-22T12:27:20.222577155Z Downloading pydantic_core-2.41.5-cp314-cp314-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+2026-02-22T12:27:20.244822793Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 92.9 MB/s  0:00:00
+2026-02-22T12:27:20.254307767Z Downloading annotated_types-0.7.0-py3-none-any.whl (13 kB)
+2026-02-22T12:27:20.271043564Z Downloading pyogrio-0.12.1-cp314-cp314-manylinux_2_28_x86_64.whl (32.5 MB)
+2026-02-22T12:27:20.454039473Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 32.5/32.5 MB 179.5 MB/s  0:00:00
+2026-02-22T12:27:20.465988256Z Downloading pyparsing-3.3.2-py3-none-any.whl (122 kB)
+2026-02-22T12:27:20.482079114Z Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+2026-02-22T12:27:20.502253804Z Downloading scipy-1.17.0-cp314-cp314-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl (35.0 MB)
+2026-02-22T12:27:20.7145592Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 35.0/35.0 MB 165.8 MB/s  0:00:00
+2026-02-22T12:27:20.723872891Z Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+2026-02-22T12:27:20.738781419Z Downloading threadpoolctl-3.6.0-py3-none-any.whl (18 kB)
+2026-02-22T12:27:20.753008735Z Downloading typing_extensions-4.15.0-py3-none-any.whl (44 kB)
+2026-02-22T12:27:20.767507982Z Downloading typing_inspection-0.4.2-py3-none-any.whl (14 kB)
+2026-02-22T12:27:20.782076464Z Downloading geopy-2.4.1-py3-none-any.whl (125 kB)
+2026-02-22T12:27:20.797018165Z Downloading geographiclib-2.1-py3-none-any.whl (40 kB)
+2026-02-22T12:27:20.812918068Z Downloading mercantile-1.2.1-py3-none-any.whl (14 kB)
+2026-02-22T12:27:20.833461937Z Downloading rasterio-1.5.0-cp314-cp314-manylinux_2_28_x86_64.whl (37.4 MB)
+2026-02-22T12:27:21.25143464Z    ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 37.4/37.4 MB 89.8 MB/s  0:00:00
+2026-02-22T12:27:21.261134671Z Downloading cligj-0.7.2-py3-none-any.whl (7.1 kB)
+2026-02-22T12:27:21.276696378Z Downloading affine-2.4.0-py3-none-any.whl (15 kB)
+2026-02-22T12:27:21.291395Z Downloading attrs-25.4.0-py3-none-any.whl (67 kB)
+2026-02-22T12:27:21.307189326Z Downloading xyzservices-2025.11.0-py3-none-any.whl (93 kB)
+2026-02-22T12:27:21.684460921Z Installing collected packages: xyzservices, urllib3, typing-extensions, threadpoolctl, six, pyparsing, pillow, packaging, numpy, networkx, kiwisolver, joblib, idna, h11, geographiclib, fonttools, cycler, click, charset_normalizer, certifi, attrs, annotated-types, annotated-doc, affine, uvicorn, typing-inspection, shapely, scipy, requests, reportlab, python-dateutil, pyproj, pyogrio, pydantic-core, mercantile, geopy, contourpy, cligj, anyio, starlette, scikit-learn, rasterio, pydantic, pandas, matplotlib, geopandas, fastapi, contextily, osmnx
+2026-02-22T12:28:01.767990815Z 
+2026-02-22T12:28:01.77279832Z Successfully installed affine-2.4.0 annotated-doc-0.0.4 annotated-types-0.7.0 anyio-4.12.1 attrs-25.4.0 certifi-2026.1.4 charset_normalizer-3.4.4 click-8.3.1 cligj-0.7.2 contextily-1.7.0 contourpy-1.3.3 cycler-0.12.1 fastapi-0.129.2 fonttools-4.61.1 geographiclib-2.1 geopandas-1.1.2 geopy-2.4.1 h11-0.16.0 idna-3.11 joblib-1.5.3 kiwisolver-1.4.9 matplotlib-3.10.8 mercantile-1.2.1 networkx-3.6.1 numpy-2.4.2 osmnx-2.1.0 packaging-26.0 pandas-3.0.1 pillow-12.1.1 pydantic-2.12.5 pydantic-core-2.41.5 pyogrio-0.12.1 pyparsing-3.3.2 pyproj-3.7.2 python-dateutil-2.9.0.post0 rasterio-1.5.0 reportlab-4.4.10 requests-2.32.5 scikit-learn-1.8.0 scipy-1.17.0 shapely-2.1.2 six-1.17.0 starlette-0.52.1 threadpoolctl-3.6.0 typing-extensions-4.15.0 typing-inspection-0.4.2 urllib3-2.6.3 uvicorn-0.41.0 xyzservices-2025.11.0
+2026-02-22T12:28:02.030828875Z 
+2026-02-22T12:28:02.030853157Z [notice] A new release of pip is available: 25.3 -> 26.0.1
+2026-02-22T12:28:02.030859767Z [notice] To update, run: pip install --upgrade pip
+2026-02-22T12:28:07.664790834Z ==> Uploading build...
+2026-02-22T12:28:37.742750621Z ==> Uploaded in 19.5s. Compression took 10.6s
+2026-02-22T12:28:37.896484065Z ==> Build successful 🎉
+2026-02-22T12:29:30.934069775Z ==> Deploying...
+2026-02-22T12:29:31.069759576Z ==> Setting WEB_CONCURRENCY=1 by default, based on available CPUs in the instance
+2026-02-22T12:30:21.261742427Z ==> Running 'uvicorn app:app --host 0.0.0.0 --port 10000'
+2026-02-22T12:30:37.151878185Z ==> No open ports detected, continuing to scan...
+2026-02-22T12:30:37.257642823Z ==> Docs on specifying a port: https://render.com/docs/web-services#port-binding
+2026-02-22T12:31:05.461861148Z Matplotlib is building the font cache; this may take a moment.
+2026-02-22T12:31:18.150654377Z INFO:     Started server process [57]
+2026-02-22T12:31:18.150745219Z INFO:     Waiting for application startup.
+2026-02-22T12:31:18.151108339Z INFO:     Application startup complete.
+2026-02-22T12:31:18.151694605Z INFO:     Uvicorn running on http://0.0.0.0:10000 (Press CTRL+C to quit)
+2026-02-22T12:31:18.221337467Z Loading zoning dataset...
+2026-02-22T12:31:18.221361057Z Loading building height dataset...
+2026-02-22T12:31:18.221366137Z Startup complete.
+2026-02-22T12:31:18.221370248Z INFO:     127.0.0.1:58198 - "HEAD / HTTP/1.1" 405 Method Not Allowed
+2026-02-22T12:31:23.231088229Z ==> Your service is live 🎉
+2026-02-22T12:31:23.401643638Z ==> 
+2026-02-22T12:31:23.40442299Z ==> ///////////////////////////////////////////////////////////
+2026-02-22T12:31:23.40695173Z ==> 
+2026-02-22T12:31:23.410807935Z ==> Available at your primary URL https://automated-site-analysis-api.onrender.com
+2026-02-22T12:31:23.412995621Z ==> 
+2026-02-22T12:31:23.415125866Z ==> ///////////////////////////////////////////////////////////
