@@ -15,7 +15,7 @@ Production-Ready Cloud-Deployed GIS Engine
 
 <br clear="left"/>
 <hr>
----
+
 # Executive Overview
 
 **Automated Site Analysis – ALKF** is a modular geospatial intelligence system designed to automate professional urban feasibility assessment.
