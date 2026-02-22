@@ -1,9 +1,8 @@
-<table>
-<tr>
-<td width="200">
-<img src="images/alkf-logo.png" width="160"/>
-</td>
-<td>
+<div style="display: flex; align-items: center; gap: 25px;">
+
+<img src="images/alkf-logo.png" width="170"/>
+
+<div>
 
 # AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+
 
@@ -12,10 +11,10 @@ Automated Geospatial Intelligence Microservice
 Urban Feasibility • Accessibility • Environmental Noise • 360° View Analysis  
 Production-Ready Cloud-Deployed GIS Engine
 
-</td>
-</tr>
-</table>
+</div>
+</div>
 
+---
 # Executive Overview
 
 **Automated Site Analysis – ALKF** is a modular geospatial intelligence system designed to automate professional urban feasibility assessment.
