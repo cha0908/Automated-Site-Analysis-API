@@ -3,11 +3,12 @@ import geopandas as gpd
 import contextily as cx
 import numpy as np
 import matplotlib.pyplot as plt
-import requests
 
 from shapely.geometry import Point, LineString
-from pyproj import Transformer
 from io import BytesIO
+
+# ✅ IMPORT UNIVERSAL RESOLVER
+from modules.resolver import resolve_location
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -28,38 +29,6 @@ GROUND_ABSORPTION = 0.6
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
-# ------------------------------------------------------------
-
-def resolve_lot(lot_id: str):
-
-    url = (
-        "https://mapapi.geodata.gov.hk/gs/api/v1.0.0/"
-        "lus/lot/SearchNumber"
-        f"?text={lot_id.replace(' ', '%20')}"
-    )
-
-    r = requests.get(url)
-    r.raise_for_status()
-
-    data = r.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x["score"])
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
 # TRAFFIC EMISSION MODEL
 # ------------------------------------------------------------
 
@@ -77,9 +46,10 @@ def traffic_emission(flow, heavy_pct, speed):
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_noise(lot_id: str):
+def generate_noise(data_type: str, value: str):
 
-    lon, lat = resolve_lot(lot_id)
+    # ✅ Dynamic resolver
+    lon, lat = resolve_location(data_type, value)
 
     site_point = gpd.GeoSeries(
         [Point(lon, lat)],
@@ -263,8 +233,9 @@ def generate_noise(lot_id: str):
     cbar = plt.colorbar(cont, ax=ax, fraction=0.03, pad=0.02)
     cbar.set_label("Noise Level Leq dB(A)")
 
+    # ✅ UPDATED TITLE
     ax.set_title(
-        f"Near-Site Environmental Noise Assessment\n{lot_id}",
+        f"Near-Site Environmental Noise Assessment\n{data_type} {value}",
         fontsize=14,
         weight="bold"
     )
