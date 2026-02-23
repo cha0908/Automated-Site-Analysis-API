@@ -2,18 +2,15 @@ import osmnx as ox
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import contextily as cx
-import requests
-import networkx as nx
 import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
 
 from shapely.geometry import Point
-from pyproj import Transformer
 from sklearn.cluster import KMeans
 from io import BytesIO
 
-# ✅ IMPORT UNIVERSAL RESOLVER
+# ✅ UNIVERSAL RESOLVER
 from modules.resolver import resolve_location
 
 ox.settings.use_cache = True
@@ -54,20 +51,19 @@ def context_rules(site_type):
 
 def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
-    # ✅ Dynamic resolver
+    # --------------------------------------------------------
+    # RESOLVE LOCATION
+    # --------------------------------------------------------
+
     lon, lat = resolve_location(data_type, value)
 
-    site_point = gpd.GeoSeries(
-        [Point(lon, lat)],
-        crs=4326
-    ).to_crs(3857).iloc[0]
+    site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
-    # ZONING (USING PRELOADED DATA)
+    # ZONING
     # --------------------------------------------------------
 
     ozp = ZONE_DATA.to_crs(3857)
-
     primary = ozp[ozp.contains(site_point)]
 
     if primary.empty:
@@ -129,7 +125,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
         stations = stations.dropna(subset=["name"]).sort_values("dist").head(2)
 
     # --------------------------------------------------------
-    # BUS STOPS CLUSTERING
+    # BUS STOPS
     # --------------------------------------------------------
 
     bus_stops = ox.features_from_point(
@@ -137,12 +133,12 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     ).to_crs(3857)
 
     if len(bus_stops) > 6:
-        coords_array = np.array([[g.x,g.y] for g in bus_stops.geometry])
+        coords_array = np.array([[g.x, g.y] for g in bus_stops.geometry])
         bus_stops["cluster"] = KMeans(n_clusters=6, random_state=0).fit(coords_array).labels_
         bus_stops = bus_stops.groupby("cluster").first()
 
     # --------------------------------------------------------
-    # LABELS
+    # PLACE LABELS
     # --------------------------------------------------------
 
     labels = ox.features_from_point(
@@ -160,47 +156,91 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=16, alpha=0.95)
 
-    ax.set_xlim(site_point.x-MAP_HALF_SIZE, site_point.x+MAP_HALF_SIZE)
-    ax.set_ylim(site_point.y-MAP_HALF_SIZE, site_point.y+MAP_HALF_SIZE)
+    ax.set_xlim(site_point.x - MAP_HALF_SIZE, site_point.x + MAP_HALF_SIZE)
+    ax.set_ylim(site_point.y - MAP_HALF_SIZE, site_point.y + MAP_HALF_SIZE)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    residential.plot(ax=ax,color="#f2c6a0",alpha=0.75)
-    industrial.plot(ax=ax,color="#b39ddb",alpha=0.75)
-    parks.plot(ax=ax,color="#b7dfb9",alpha=0.9)
-    schools.plot(ax=ax,color="#9ecae1",alpha=0.9)
-    buildings.plot(ax=ax,color="#d9d9d9",alpha=0.35)
+    residential.plot(ax=ax, color="#f2c6a0", alpha=0.75)
+    industrial.plot(ax=ax, color="#b39ddb", alpha=0.75)
+    parks.plot(ax=ax, color="#b7dfb9", alpha=0.9)
+    schools.plot(ax=ax, color="#9ecae1", alpha=0.9)
+    buildings.plot(ax=ax, color="#d9d9d9", alpha=0.35)
 
     if not bus_stops.empty:
-        bus_stops.plot(ax=ax,color="#0d47a1",markersize=35,zorder=9)
+        bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
 
     if not stations.empty:
-        stations.plot(
-            ax=ax,
-            facecolor=MTR_COLOR,
-            edgecolor="none",
-            alpha=0.9,
-            zorder=10
-        )
+        stations.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none", alpha=0.9, zorder=10)
 
-    site_gdf.plot(ax=ax,facecolor="#e53935",edgecolor="darkred",linewidth=2,zorder=11)
+    site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred", linewidth=2, zorder=11)
 
-    ax.text(site_geom.centroid.x, site_geom.centroid.y,"SITE",
-            color="white",weight="bold",ha="center",va="center",zorder=12)
+    ax.text(site_geom.centroid.x, site_geom.centroid.y, "SITE",
+            color="white", weight="bold", ha="center", va="center", zorder=12)
 
     # --------------------------------------------------------
-    # INFO BOX (UPDATED)
+    # DRAW PLACE LABELS (RESTORED)
+    # --------------------------------------------------------
+
+    offsets = [(0,35),(0,-35),(35,0),(-35,0),(25,25),(-25,25)]
+    placed = []
+
+    for i, (_, row) in enumerate(labels.iterrows()):
+
+        p = row.geometry.representative_point()
+
+        if p.distance(site_point) < 140:
+            continue
+
+        if any(p.distance(pp) < 120 for pp in placed):
+            continue
+
+        dx, dy = offsets[i % len(offsets)]
+
+        ax.text(
+            p.x + dx,
+            p.y + dy,
+            wrap_label(row["label"], 18),
+            fontsize=9,
+            ha="center",
+            va="center",
+            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, boxstyle="round,pad=0.25"),
+            zorder=12,
+            clip_on=True
+        )
+
+        placed.append(p)
+
+    # --------------------------------------------------------
+    # MTR NAME LABELS
+    # --------------------------------------------------------
+
+    if not stations.empty:
+        for _, st in stations.iterrows():
+            ax.text(
+                st.centroid.x,
+                st.centroid.y + 120,
+                wrap_label(st["name"], 18),
+                fontsize=9,
+                ha="center",
+                va="center",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.0),
+                zorder=12
+            )
+
+    # --------------------------------------------------------
+    # INFO BOX
     # --------------------------------------------------------
 
     ax.text(
-        0.015,0.985,
+        0.015, 0.985,
         f"{data_type}: {value}\n"
         f"OZP Plan: {primary['PLAN_NO']}\n"
         f"Zoning: {zone}\n"
         f"Site Type: {SITE_TYPE}\n",
         transform=ax.transAxes,
-        ha="left",va="top",fontsize=9.2,
-        bbox=dict(facecolor="white",edgecolor="black",pad=6)
+        ha="left", va="top", fontsize=9.2,
+        bbox=dict(facecolor="white", edgecolor="black", pad=6)
     )
 
     # --------------------------------------------------------
@@ -223,7 +263,6 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
         framealpha=0.95
     )
 
-    # ✅ UPDATED TITLE
     ax.set_title(
         f"Automated Site Context Analysis – {data_type} {value}",
         fontsize=15,
@@ -234,7 +273,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=120)
     plt.close(fig)
 
     return buffer
