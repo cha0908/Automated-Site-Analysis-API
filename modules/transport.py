@@ -1,40 +1,67 @@
-def generate_transport(lon: float, lat: float):
+import osmnx as ox
+import geopandas as gpd
+import contextily as cx
+import matplotlib.pyplot as plt
+import requests
+import matplotlib.patches as mpatches
+import matplotlib.lines as mlines
+import numpy as np
 
-    # --------------------------------------------------------
-    # LOCAL IMPORTS (reduce base memory)
-    # --------------------------------------------------------
+from shapely.geometry import Point, box
+from pyproj import Transformer
+from io import BytesIO
 
-    import osmnx as ox
-    import geopandas as gpd
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as mpatches
-    import matplotlib.lines as mlines
-    import contextily as cx
-    from shapely.geometry import Point
-    from io import BytesIO
+ox.settings.use_cache = True
+ox.settings.log_console = False
 
-    ox.settings.use_cache = True
-    ox.settings.log_console = False
-    ox.settings.timeout = 60
+MAP_RADIUS = 3000
 
-    # --------------------------------------------------------
-    # OPTIMIZED SETTINGS (FREE TIER SAFE)
-    # --------------------------------------------------------
+COLOR_EXISTING_RAIL = "#e06a2b"
+COLOR_MTR = "#3f78b5"
+COLOR_ROADS = "#e85d9e"
+COLOR_WATER = "#6fa8dc"
+COLOR_BUILDINGS = "#d6d6d6"
+COLOR_SITE = "#FF0000"
 
-    MAP_RADIUS = 1200        # 🔥 reduced from 2200
-    MAP_EXTENT = 1000        # 🔥 reduced extent
-    FETCH_LIMIT = 800        # 🔥 hard cap rows
 
-    COLOR_EXISTING_RAIL = "#e06a2b"
-    COLOR_MTR = "#3f78b5"
-    COLOR_ROADS = "#e85d9e"
-    COLOR_WATER = "#6fa8dc"
-    COLOR_BUILDINGS = "#d6d6d6"
-    COLOR_SITE = "#FF0000"
+# ------------------------------------------------------------
+# LOT RESOLVER
+# ------------------------------------------------------------
 
-    # --------------------------------------------------------
-    # SITE POINT
-    # --------------------------------------------------------
+def resolve_lot(lot_id: str):
+
+    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
+    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
+
+    response = requests.get(url)
+
+    if response.status_code != 200:
+        raise ValueError("Failed to resolve lot.")
+
+    data = response.json()
+
+    if "candidates" not in data or len(data["candidates"]) == 0:
+        raise ValueError("Lot not found.")
+
+    best = max(data["candidates"], key=lambda x: x.get("score", 0))
+
+    x2326 = best["location"]["x"]
+    y2326 = best["location"]["y"]
+
+    lon, lat = Transformer.from_crs(
+        2326, 4326, always_xy=True
+    ).transform(x2326, y2326)
+
+    return lon, lat
+
+
+# ------------------------------------------------------------
+# MAIN GENERATOR
+# ------------------------------------------------------------
+
+def generate_transport(lot_id: str):
+
+    lon, lat = resolve_lot(lot_id)
 
     site_point = gpd.GeoSeries(
         [Point(lon, lat)],
@@ -42,22 +69,15 @@ def generate_transport(lon: float, lat: float):
     ).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
-    # SAFE FETCH (LIMITED)
+    # SAFE FETCH
     # --------------------------------------------------------
 
     def safe_fetch(tags):
         try:
-            gdf = ox.features_from_point(
-                (lat, lon),
-                dist=MAP_RADIUS,
-                tags=tags
-            )
-            if gdf.empty:
-                return gpd.GeoDataFrame(geometry=[], crs=3857)
-
-            gdf = gdf.head(FETCH_LIMIT)   # 🔥 limit rows early
-            return gdf.to_crs(3857)
-
+            gdf = ox.features_from_point((lat, lon), dist=MAP_RADIUS, tags=tags)
+            if not gdf.empty:
+                return gdf.to_crs(3857)
+            return gpd.GeoDataFrame(geometry=[], crs=3857)
         except:
             return gpd.GeoDataFrame(geometry=[], crs=3857)
 
@@ -67,93 +87,122 @@ def generate_transport(lon: float, lat: float):
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
     # --------------------------------------------------------
-    # FETCH DATA (REDUCED)
+    # FETCH DATA
     # --------------------------------------------------------
 
     buildings = safe_fetch({"building": True})
-    roads = keep_lines(safe_fetch({"highway":["primary","secondary"]}))  # 🔥 reduced types
+    roads = keep_lines(safe_fetch({"highway":["motorway","trunk","primary","secondary"]}))
     light_rail = keep_lines(safe_fetch({"railway":"light_rail"}))
     stations = safe_fetch({"railway":"station"})
     water = safe_fetch({"natural":"water"})
     mtr_routes = keep_lines(safe_fetch({"railway":["rail","subway"]}))
 
     # --------------------------------------------------------
-    # SITE FOOTPRINT
+    # SITE POLYGON
     # --------------------------------------------------------
 
     if not buildings.empty:
-        buildings["dist"] = buildings.geometry.distance(site_point)
-        site_geom = buildings.sort_values("dist").geometry.iloc[0]
+        distances = buildings.geometry.distance(site_point)
+        nearest_idx = distances.idxmin()
+        site_geom = buildings.loc[nearest_idx, "geometry"]
     else:
-        site_geom = site_point.buffer(35)
+        site_geom = site_point.buffer(40)
 
     site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # EXTENT
+    # PLOT
     # --------------------------------------------------------
 
-    xmin = site_point.x - MAP_EXTENT
-    xmax = site_point.x + MAP_EXTENT
-    ymin = site_point.y - MAP_EXTENT
-    ymax = site_point.y + MAP_EXTENT
-
-    # --------------------------------------------------------
-    # PLOT (LIGHTWEIGHT)
-    # --------------------------------------------------------
-
-    fig, ax = plt.subplots(figsize=(10, 7))  # 🔥 smaller figure
-
+    fig, ax = plt.subplots(figsize=(18,10))
+    fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    # Optional: comment if memory still high
-    cx.add_basemap(
-        ax,
-        source=cx.providers.CartoDB.Positron,
-        zoom=13,        # 🔥 reduced zoom
-        alpha=0.5
-    )
+    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=15, alpha=0.5)
 
-    # Buildings
     if not buildings.empty:
-        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, linewidth=0)
+        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
 
-    # Water
     if not water.empty:
-        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, linewidth=0)
+        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
 
-    # Roads
     if not roads.empty:
-        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=1.2)
+        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
 
-    # MTR
+    # --------------------------------------------------------
+    # MTR ROUTES
+    # --------------------------------------------------------
+
+    xmin = site_point.x - 1600
+    xmax = site_point.x + 2200
+    ymin = site_point.y - 1100
+    ymax = site_point.y + 1100
+
+    clip_box = box(xmin, ymin, xmax, ymax)
+    clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
+
     if not mtr_routes.empty:
-        mtr_routes.plot(ax=ax, color="white", linewidth=4)
-        mtr_routes.plot(ax=ax, color=COLOR_MTR, linewidth=2.5)
 
-        if "name" in mtr_routes.columns:
-            labeled = mtr_routes.dropna(subset=["name"]).head(5)
+        mtr_visible = gpd.clip(mtr_routes, clip_gdf)
 
-            for _, row in labeled.iterrows():
-                name = str(row["name"])[:20]
-                midpoint = row.geometry.interpolate(0.5, normalized=True)
+        if not mtr_visible.empty:
 
-                ax.text(
-                    midpoint.x,
-                    midpoint.y,
-                    name.upper(),
-                    fontsize=8,
-                    weight="bold",
-                    color=COLOR_MTR,
-                    ha="center",
-                    bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1)
-                )
+            mtr_visible.plot(ax=ax, color="white", linewidth=8, zorder=4)
+            mtr_visible.plot(ax=ax, color=COLOR_MTR, linewidth=4.5, zorder=5)
 
-    # Light Rail
+            placed_positions = []
+
+            if "name" in mtr_visible.columns:
+
+                unique_names = mtr_visible["name"].dropna().unique()
+
+                for name in unique_names:
+
+                    clean_name = ''.join(c for c in name if ord(c) < 128).strip()
+                    if clean_name == "":
+                        continue
+
+                    subset = mtr_visible[mtr_visible["name"] == name]
+                    merged = subset.union_all()
+
+                    if merged.length < 600:
+                        continue
+
+                    midpoint = merged.interpolate(0.5, normalized=True)
+
+                    offset_y = 0
+                    for pt in placed_positions:
+                        if midpoint.distance(pt) < 500:
+                            offset_y += 150
+
+                    new_point = Point(midpoint.x, midpoint.y + offset_y)
+                    placed_positions.append(new_point)
+
+                    ax.text(
+                        new_point.x,
+                        new_point.y,
+                        clean_name.upper(),
+                        fontsize=9,
+                        weight="bold",
+                        color=COLOR_MTR,
+                        ha="center",
+                        va="center",
+                        zorder=10,
+                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=2)
+                    )
+
+    # --------------------------------------------------------
+    # LIGHT RAIL
+    # --------------------------------------------------------
+
     if not light_rail.empty:
-        light_rail.plot(ax=ax, color=COLOR_EXISTING_RAIL, linewidth=2)
+        light_rail.plot(ax=ax, color="white", linewidth=6, zorder=4)
+        light_rail.plot(ax=ax, color=COLOR_EXISTING_RAIL, linewidth=3.5, zorder=5)
 
-    # Stations
+    # --------------------------------------------------------
+    # STATIONS
+    # --------------------------------------------------------
+
     if not stations.empty:
         station_pts = stations.copy()
         station_pts["geometry"] = station_pts.centroid
@@ -162,32 +211,99 @@ def generate_transport(lon: float, lat: float):
             ax=ax,
             facecolor="white",
             edgecolor=COLOR_EXISTING_RAIL,
-            markersize=70,
-            linewidth=1.5
+            markersize=120,
+            linewidth=2,
+            zorder=6
         )
 
-    # Site
-    site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="none")
+    # --------------------------------------------------------
+    # SITE
+    # --------------------------------------------------------
+
+    site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="none", zorder=7)
+
+    centroid = site_geom.centroid
 
     ax.text(
-        site_geom.centroid.x,
-        site_geom.centroid.y - 80,
+        centroid.x,
+        centroid.y - 120,
         "SITE",
-        fontsize=12,
+        fontsize=14,
         weight="bold",
         ha="center"
     )
 
+    # --------------------------------------------------------
+    # NORTH ARROW
+    # --------------------------------------------------------
+
+    ax.annotate(
+        '',
+        xy=(0.07, 0.85),
+        xytext=(0.07, 0.80),
+        xycoords=ax.transAxes,
+        arrowprops=dict(facecolor='black', width=1.5, headwidth=8, headlength=10)
+    )
+
+    ax.text(
+        0.07, 0.86,
+        "N",
+        transform=ax.transAxes,
+        ha='center',
+        va='bottom',
+        fontsize=12
+    )
+
+    # --------------------------------------------------------
+    # EXTENT
+    # --------------------------------------------------------
+
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    ax.set_title("SITE ANALYSIS – Transportation", fontsize=14, weight="bold")
+    # --------------------------------------------------------
+    # LEGEND
+    # --------------------------------------------------------
+
+    legend = ax.legend(
+        handles=[
+            mlines.Line2D([], [], color=COLOR_EXISTING_RAIL, linewidth=5, label="Existing Light Rail"),
+            mlines.Line2D([], [], color=COLOR_MTR, linewidth=5, label="MTR Line"),
+            mlines.Line2D([], [], color=COLOR_ROADS, linewidth=5, label="Vehicle Circulation"),
+            mpatches.Patch(facecolor=COLOR_SITE, label="Site"),
+            mlines.Line2D([], [], marker='o', linestyle='None',
+                         markerfacecolor='white',
+                         markeredgecolor=COLOR_EXISTING_RAIL,
+                         markeredgewidth=2,
+                         markersize=9,
+                         label="Rail Station")
+        ],
+        loc="lower left",
+        bbox_to_anchor=(0.02, 0.15),
+        frameon=True,
+        facecolor="white",
+        edgecolor="black",
+        fontsize=10,
+        title="Legend"
+    )
+
+    legend.get_frame().set_linewidth(2)
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    ax.set_title(
+        f"SITE ANALYSIS – Transportation (LOT {lot_id})",
+        fontsize=18,
+        weight="bold"
+    )
+
     ax.set_axis_off()
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=120)  # 🔥 reduced DPI
+    plt.savefig(buffer, format="png", dpi=200)
     plt.close(fig)
 
-    buffer.seek(0)
     return buffer
