@@ -2,19 +2,21 @@ import osmnx as ox
 import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
-import requests
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import numpy as np
 
 from shapely.geometry import Point, box
-from pyproj import Transformer
 from io import BytesIO
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
 
-MAP_RADIUS = 3000
+# ------------------------------------------------------------
+# OPTIMIZED SETTINGS
+# ------------------------------------------------------------
+
+MAP_RADIUS = 2200   # reduced from 3000
 
 COLOR_EXISTING_RAIL = "#e06a2b"
 COLOR_MTR = "#3f78b5"
@@ -25,43 +27,10 @@ COLOR_SITE = "#FF0000"
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
+# MAIN GENERATOR (UPDATED + OPTIMIZED)
 # ------------------------------------------------------------
 
-def resolve_lot(lot_id: str):
-
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
-# MAIN GENERATOR
-# ------------------------------------------------------------
-
-def generate_transport(lot_id: str):
-
-    lon, lat = resolve_lot(lot_id)
+def generate_transport(lon: float, lat: float):
 
     site_point = gpd.GeoSeries(
         [Point(lon, lat)],
@@ -69,12 +38,16 @@ def generate_transport(lot_id: str):
     ).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
-    # SAFE FETCH
+    # SAFE FETCH (Reduced Radius)
     # --------------------------------------------------------
 
     def safe_fetch(tags):
         try:
-            gdf = ox.features_from_point((lat, lon), dist=MAP_RADIUS, tags=tags)
+            gdf = ox.features_from_point(
+                (lat, lon),
+                dist=MAP_RADIUS,
+                tags=tags
+            )
             if not gdf.empty:
                 return gdf.to_crs(3857)
             return gpd.GeoDataFrame(geometry=[], crs=3857)
@@ -98,7 +71,7 @@ def generate_transport(lot_id: str):
     mtr_routes = keep_lines(safe_fetch({"railway":["rail","subway"]}))
 
     # --------------------------------------------------------
-    # SITE POLYGON
+    # SITE FOOTPRINT
     # --------------------------------------------------------
 
     if not buildings.empty:
@@ -111,35 +84,48 @@ def generate_transport(lot_id: str):
     site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT
+    # EXTENT (Reduced)
     # --------------------------------------------------------
 
-    fig, ax = plt.subplots(figsize=(18,10))
-    fig.patch.set_facecolor("#f4f4f4")
-    ax.set_facecolor("#f4f4f4")
-
-    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=15, alpha=0.5)
-
-    if not buildings.empty:
-        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-
-    if not water.empty:
-        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
-
-    if not roads.empty:
-        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
-
-    # --------------------------------------------------------
-    # MTR ROUTES
-    # --------------------------------------------------------
-
-    xmin = site_point.x - 1600
-    xmax = site_point.x + 2200
-    ymin = site_point.y - 1100
-    ymax = site_point.y + 1100
+    xmin = site_point.x - 1400
+    xmax = site_point.x + 1800
+    ymin = site_point.y - 1000
+    ymax = site_point.y + 1000
 
     clip_box = box(xmin, ymin, xmax, ymax)
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
+
+    # --------------------------------------------------------
+    # PLOT
+    # --------------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(14,8))  # reduced size
+
+    fig.patch.set_facecolor("#f4f4f4")
+    ax.set_facecolor("#f4f4f4")
+
+    cx.add_basemap(
+        ax,
+        source=cx.providers.CartoDB.Positron,
+        zoom=14,   # reduced from 15
+        alpha=0.6
+    )
+
+    # Buildings
+    if not buildings.empty:
+        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
+
+    # Water
+    if not water.empty:
+        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+
+    # Roads
+    if not roads.empty:
+        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=1.8, zorder=3)
+
+    # --------------------------------------------------------
+    # MTR ROUTES (Optimized Labeling)
+    # --------------------------------------------------------
 
     if not mtr_routes.empty:
 
@@ -147,42 +133,29 @@ def generate_transport(lot_id: str):
 
         if not mtr_visible.empty:
 
-            mtr_visible.plot(ax=ax, color="white", linewidth=8, zorder=4)
-            mtr_visible.plot(ax=ax, color=COLOR_MTR, linewidth=4.5, zorder=5)
+            mtr_visible.plot(ax=ax, color="white", linewidth=6, zorder=4)
+            mtr_visible.plot(ax=ax, color=COLOR_MTR, linewidth=3.5, zorder=5)
 
-            placed_positions = []
-
+            # Simplified labeling (avoid heavy union_all)
             if "name" in mtr_visible.columns:
 
-                unique_names = mtr_visible["name"].dropna().unique()
+                labeled = mtr_visible.dropna(subset=["name"]).head(6)
 
-                for name in unique_names:
+                for _, row in labeled.iterrows():
 
-                    clean_name = ''.join(c for c in name if ord(c) < 128).strip()
+                    name = row["name"]
+                    clean_name = ''.join(c for c in str(name) if ord(c) < 128).strip()
+
                     if clean_name == "":
                         continue
 
-                    subset = mtr_visible[mtr_visible["name"] == name]
-                    merged = subset.union_all()
-
-                    if merged.length < 600:
-                        continue
-
-                    midpoint = merged.interpolate(0.5, normalized=True)
-
-                    offset_y = 0
-                    for pt in placed_positions:
-                        if midpoint.distance(pt) < 500:
-                            offset_y += 150
-
-                    new_point = Point(midpoint.x, midpoint.y + offset_y)
-                    placed_positions.append(new_point)
+                    midpoint = row.geometry.interpolate(0.5, normalized=True)
 
                     ax.text(
-                        new_point.x,
-                        new_point.y,
+                        midpoint.x,
+                        midpoint.y,
                         clean_name.upper(),
-                        fontsize=9,
+                        fontsize=8.5,
                         weight="bold",
                         color=COLOR_MTR,
                         ha="center",
@@ -196,8 +169,8 @@ def generate_transport(lot_id: str):
     # --------------------------------------------------------
 
     if not light_rail.empty:
-        light_rail.plot(ax=ax, color="white", linewidth=6, zorder=4)
-        light_rail.plot(ax=ax, color=COLOR_EXISTING_RAIL, linewidth=3.5, zorder=5)
+        light_rail.plot(ax=ax, color="white", linewidth=5, zorder=4)
+        light_rail.plot(ax=ax, color=COLOR_EXISTING_RAIL, linewidth=3, zorder=5)
 
     # --------------------------------------------------------
     # STATIONS
@@ -211,7 +184,7 @@ def generate_transport(lot_id: str):
             ax=ax,
             facecolor="white",
             edgecolor=COLOR_EXISTING_RAIL,
-            markersize=120,
+            markersize=100,
             linewidth=2,
             zorder=6
         )
@@ -226,9 +199,9 @@ def generate_transport(lot_id: str):
 
     ax.text(
         centroid.x,
-        centroid.y - 120,
+        centroid.y - 100,
         "SITE",
-        fontsize=14,
+        fontsize=13,
         weight="bold",
         ha="center"
     )
@@ -251,7 +224,7 @@ def generate_transport(lot_id: str):
         transform=ax.transAxes,
         ha='center',
         va='bottom',
-        fontsize=12
+        fontsize=11
     )
 
     # --------------------------------------------------------
@@ -267,15 +240,15 @@ def generate_transport(lot_id: str):
 
     legend = ax.legend(
         handles=[
-            mlines.Line2D([], [], color=COLOR_EXISTING_RAIL, linewidth=5, label="Existing Light Rail"),
-            mlines.Line2D([], [], color=COLOR_MTR, linewidth=5, label="MTR Line"),
-            mlines.Line2D([], [], color=COLOR_ROADS, linewidth=5, label="Vehicle Circulation"),
+            mlines.Line2D([], [], color=COLOR_EXISTING_RAIL, linewidth=4, label="Light Rail"),
+            mlines.Line2D([], [], color=COLOR_MTR, linewidth=4, label="MTR Line"),
+            mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation"),
             mpatches.Patch(facecolor=COLOR_SITE, label="Site"),
             mlines.Line2D([], [], marker='o', linestyle='None',
                          markerfacecolor='white',
                          markeredgecolor=COLOR_EXISTING_RAIL,
                          markeredgewidth=2,
-                         markersize=9,
+                         markersize=8,
                          label="Rail Station")
         ],
         loc="lower left",
@@ -283,19 +256,19 @@ def generate_transport(lot_id: str):
         frameon=True,
         facecolor="white",
         edgecolor="black",
-        fontsize=10,
+        fontsize=9,
         title="Legend"
     )
 
-    legend.get_frame().set_linewidth(2)
+    legend.get_frame().set_linewidth(1.5)
 
     # --------------------------------------------------------
     # TITLE
     # --------------------------------------------------------
 
     ax.set_title(
-        f"SITE ANALYSIS – Transportation (LOT {lot_id})",
-        fontsize=18,
+        "SITE ANALYSIS – Transportation",
+        fontsize=16,
         weight="bold"
     )
 
@@ -303,7 +276,7 @@ def generate_transport(lot_id: str):
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=130)  # reduced DPI
     plt.close(fig)
 
     return buffer
