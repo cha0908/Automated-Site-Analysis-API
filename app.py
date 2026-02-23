@@ -71,7 +71,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 ZONE_PATH = os.path.join(DATA_DIR, "ZONE_REDUCED.gpkg")
-BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL.gpkg")
+BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")
 
 print("Loading zoning dataset...")
 ZONE_DATA = gpd.read_file(ZONE_PATH).to_crs(3857)
