@@ -3,61 +3,32 @@ import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
 import networkx as nx
-import requests
 import numpy as np
 
 from shapely.geometry import Point
-from pyproj import Transformer
 from io import BytesIO
 
 ox.settings.log_console = False
 ox.settings.use_cache = True
 
+# ------------------------------------------------------------
+# OPTIMIZED SETTINGS
+# ------------------------------------------------------------
+
 WALK_SPEED_KMPH = 5
-MAP_EXTENT = 2000
+GRAPH_RADIUS = 2200      # reduced from 3000
+MAP_EXTENT = 1600        # reduced from 2000
+STATION_RADIUS = 2200    # reduced
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
+# MAIN GENERATOR (UPDATED + OPTIMIZED)
 # ------------------------------------------------------------
 
-def resolve_lot(lot_id: str):
-
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
-# MAIN GENERATOR
-# ------------------------------------------------------------
-
-def generate_walking(lot_id: str):
-
-    lon, lat = resolve_lot(lot_id)
+def generate_walking(lon: float, lat: float):
 
     # --------------------------------------------------------
-    # GET SITE FOOTPRINT
+    # SITE FOOTPRINT
     # --------------------------------------------------------
 
     osm_site = ox.features_from_point(
@@ -81,12 +52,12 @@ def generate_walking(lot_id: str):
     site_point = site_geom.centroid
 
     # --------------------------------------------------------
-    # WALK NETWORK
+    # WALK NETWORK (Reduced Radius)
     # --------------------------------------------------------
 
     G_walk = ox.graph_from_point(
         (lat, lon),
-        dist=3000,
+        dist=GRAPH_RADIUS,
         network_type="walk"
     )
 
@@ -107,13 +78,13 @@ def generate_walking(lot_id: str):
     )
 
     # --------------------------------------------------------
-    # FETCH STATIONS
+    # FETCH STATIONS (Reduced Radius)
     # --------------------------------------------------------
 
     stations = ox.features_from_point(
         (lat, lon),
         tags={"railway": "station"},
-        dist=3000
+        dist=STATION_RADIUS
     ).to_crs(3857)
 
     stations = stations[stations.geometry.notnull()]
@@ -181,25 +152,26 @@ def generate_walking(lot_id: str):
         })
 
     # --------------------------------------------------------
-    # PLOT
+    # PLOT (Smaller + Lower DPI)
     # --------------------------------------------------------
 
-    fig, ax = plt.subplots(figsize=(12, 12))
+    fig, ax = plt.subplots(figsize=(10, 10))
 
-    roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
+    roads.plot(ax=ax, linewidth=0.2, color="#8a8a8a", alpha=0.35)
 
+    # Walking Rings
     gpd.GeoSeries([site_point.buffer(1125)], crs=3857).plot(
-        ax=ax, color="#2aa9ff", alpha=0.15
+        ax=ax, color="#2aa9ff", alpha=0.12
     )
 
     for d, lbl in [(375, "5 min"), (750, "10 min"), (1125, "15 min")]:
         gpd.GeoSeries([site_point.buffer(d)], crs=3857).boundary.plot(
             ax=ax,
             linestyle=(0, (4, 3)),
-            linewidth=2,
+            linewidth=1.6,
             color="#2aa9ff"
         )
-        ax.text(site_point.x + d + 120, site_point.y, lbl, fontsize=9)
+        ax.text(site_point.x + d + 100, site_point.y, lbl, fontsize=8)
 
     colors = ["#4caf50", "#ef5350", "#42a5f5"]
 
@@ -209,7 +181,7 @@ def generate_walking(lot_id: str):
 
         r["route"].plot(
             ax=ax,
-            linewidth=2.8,
+            linewidth=2.4,
             color=route_color,
             alpha=0.85,
             zorder=5
@@ -218,7 +190,7 @@ def generate_walking(lot_id: str):
         station_geom = r["station_polygon"]
 
         if station_geom.geom_type == "Point":
-            station_geom = station_geom.buffer(60)
+            station_geom = station_geom.buffer(55)
 
         gpd.GeoSeries([station_geom], crs=3857).plot(
             ax=ax,
@@ -235,7 +207,7 @@ def generate_walking(lot_id: str):
             mid.x,
             mid.y,
             f"{r['time']} min\n{r['distance']} km",
-            fontsize=9,
+            fontsize=8,
             weight="bold",
             color=route_color,
             ha="center",
@@ -244,19 +216,20 @@ def generate_walking(lot_id: str):
 
         ax.text(
             r["station_centroid"].x,
-            r["station_centroid"].y + 120,
+            r["station_centroid"].y + 100,
             r["name"].upper(),
-            fontsize=10,
+            fontsize=9,
             weight="bold",
             ha="center",
             zorder=7
         )
 
+    # Site
     site_gdf.plot(ax=ax, facecolor="red", edgecolor="none")
 
     ax.text(
         site_point.x,
-        site_point.y - 120,
+        site_point.y - 100,
         "SITE",
         color="red",
         weight="bold",
@@ -269,13 +242,13 @@ def generate_walking(lot_id: str):
     cx.add_basemap(
         ax,
         source=cx.providers.CartoDB.PositronNoLabels,
-        zoom=15,
+        zoom=14,   # reduced from 15
         alpha=0.4
     )
 
     ax.set_title(
-        f"Walking Accessibility - LOT {lot_id}",
-        fontsize=15,
+        "Walking Accessibility",
+        fontsize=14,
         weight="bold"
     )
 
@@ -283,7 +256,7 @@ def generate_walking(lot_id: str):
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=130)  # reduced from 200
     plt.close(fig)
 
     return buffer
