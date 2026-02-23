@@ -3,66 +3,38 @@ import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
 import networkx as nx
-import requests
 import matplotlib.lines as mlines
 
 from shapely.geometry import Point, LineString, MultiLineString
-from pyproj import Transformer
 from io import BytesIO
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
 
 DRIVE_SPEED = 35  # km/h
-MAP_EXTENT = 1400
+MAP_EXTENT = 1200   # reduced for performance
+GRAPH_RADIUS = 2200  # reduced from 3000
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
+# MAIN GENERATOR (UPDATED + OPTIMIZED)
 # ------------------------------------------------------------
 
-def resolve_lot(lot_id: str):
+def generate_driving(lon: float, lat: float, ZONE_DATA: gpd.GeoDataFrame):
 
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
+    # --------------------------------------------------------
+    # SITE POINT
+    # --------------------------------------------------------
 
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
-# MAIN GENERATOR
-# ------------------------------------------------------------
-
-def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
-
-    lon, lat = resolve_lot(lot_id)
+    site_point_wgs = Point(lon, lat)
 
     site_point = gpd.GeoSeries(
-        [Point(lon, lat)],
+        [site_point_wgs],
         crs=4326
     ).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
-    # SITE POLYGON FROM PRELOADED ZONE DATA
+    # ZONING
     # --------------------------------------------------------
 
     ozp = ZONE_DATA.to_crs(3857)
@@ -77,24 +49,31 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     centroid = site_polygon.centroid
 
     # --------------------------------------------------------
-    # DRIVE NETWORK
+    # DRIVE NETWORK (REDUCED RADIUS)
     # --------------------------------------------------------
 
-    G = ox.graph_from_point((lat, lon), dist=3000, network_type="drive")
+    G = ox.graph_from_point(
+        (lat, lon),
+        dist=GRAPH_RADIUS,
+        network_type="drive"
+    )
 
-    for u, v, k, data in G.edges(keys=True, data=True):
-        data["travel_time"] = data["length"] / (DRIVE_SPEED * 1000 / 60)
+    # Precompute travel time once
+    meters_per_min = DRIVE_SPEED * 1000 / 60
+
+    for _, _, _, data in G.edges(keys=True, data=True):
+        data["travel_time"] = data["length"] / meters_per_min
 
     site_node = ox.distance.nearest_nodes(G, lon, lat)
 
     # --------------------------------------------------------
-    # FETCH STATIONS
+    # FETCH STATIONS (REDUCED DIST)
     # --------------------------------------------------------
 
     stations = ox.features_from_point(
         (lat, lon),
         tags={"railway": "station"},
-        dist=3000
+        dist=GRAPH_RADIUS
     ).to_crs(3857)
 
     if stations.empty:
@@ -104,7 +83,7 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     stations = stations.sort_values("dist").head(3)
 
     # --------------------------------------------------------
-    # ROUTE FUNCTIONS
+    # ROUTE FUNCTION
     # --------------------------------------------------------
 
     def get_route(node_from, node_to):
@@ -128,7 +107,6 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
             return
 
         coords = list(merged.coords)
-
         if len(coords) < 2:
             return
 
@@ -142,7 +120,7 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
                 arrowstyle="-|>",
                 color=color,
                 lw=2,
-                mutation_scale=18
+                mutation_scale=16
             ),
             zorder=20
         )
@@ -151,43 +129,46 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     # PLOT
     # --------------------------------------------------------
 
-    fig, ax = plt.subplots(figsize=(12, 12))
+    fig, ax = plt.subplots(figsize=(11, 11))  # slightly smaller
+
     fig.patch.set_facecolor("#f2f2f2")
     ax.set_facecolor("#f2f2f2")
 
     cx.add_basemap(
         ax,
         source=cx.providers.CartoDB.PositronNoLabels,
-        zoom=17,
+        zoom=16,   # reduced zoom slightly
         alpha=1.0
     )
 
+    # Plot road network lightly
     edges = ox.graph_to_gdfs(G, nodes=False).to_crs(3857)
-    edges.plot(ax=ax, linewidth=0.6, color="#8f8f8f", alpha=0.35, zorder=1)
+    edges.plot(ax=ax, linewidth=0.5, color="#8f8f8f", alpha=0.3, zorder=1)
 
     # Rings
-    ring1 = centroid.buffer(375)
-    ring2 = centroid.buffer(750)
-    ring3 = centroid.buffer(1125)
+    ring_distances = [350, 700, 1050]
 
-    for ring, alpha in zip([ring3, ring2, ring1], [0.05, 0.07, 0.10]):
-        gpd.GeoSeries([ring], crs=3857).plot(
+    for d in ring_distances[::-1]:
+        gpd.GeoSeries([centroid.buffer(d)], crs=3857).plot(
             ax=ax,
             color="#f4d03f",
-            alpha=alpha,
+            alpha=0.06,
             zorder=2
         )
 
-    for ring in [ring3, ring2, ring1]:
-        gpd.GeoSeries([ring], crs=3857).boundary.plot(
+    for d in ring_distances:
+        gpd.GeoSeries([centroid.buffer(d)], crs=3857).boundary.plot(
             ax=ax,
             color="#c8a600",
-            linewidth=2,
+            linewidth=1.6,
             linestyle=(0, (6, 5)),
-            zorder=5
+            zorder=4
         )
 
-    # Routes
+    # --------------------------------------------------------
+    # ROUTES
+    # --------------------------------------------------------
+
     for _, station in stations.iterrows():
 
         st_centroid = station.geometry.centroid
@@ -198,22 +179,22 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
         egress = get_route(site_node, station_node)
 
         if ingress is not None:
-            ingress.plot(ax=ax, linewidth=2.5, color="#e74c3c", zorder=10)
+            ingress.plot(ax=ax, linewidth=2.2, color="#e74c3c", zorder=10)
             add_route_arrow(ax, ingress, "#e74c3c")
 
         if egress is not None:
-            egress.plot(ax=ax, linewidth=2.5, color="#27ae60", zorder=10)
+            egress.plot(ax=ax, linewidth=2.2, color="#27ae60", zorder=10)
             add_route_arrow(ax, egress, "#27ae60")
 
         station_geom = station.geometry
         if station_geom.geom_type == "Point":
-            station_geom = station_geom.buffer(60)
+            station_geom = station_geom.buffer(55)
 
         gpd.GeoSeries([station_geom], crs=3857).plot(
             ax=ax,
             facecolor="#5dade2",
             edgecolor="#2e86c1",
-            linewidth=1.5,
+            linewidth=1.2,
             alpha=0.6,
             zorder=7
         )
@@ -222,16 +203,19 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
 
         ax.text(
             st_centroid.x,
-            st_centroid.y + 120,
+            st_centroid.y + 110,
             name.upper(),
-            fontsize=9,
+            fontsize=8.5,
             weight="bold",
             ha="center",
             bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2),
             zorder=8
         )
 
-    # Site
+    # --------------------------------------------------------
+    # SITE
+    # --------------------------------------------------------
+
     site_gdf.plot(
         ax=ax,
         facecolor="#ff4d4d",
@@ -242,32 +226,34 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
 
     ax.text(
         centroid.x,
-        centroid.y - 70,
+        centroid.y - 60,
         "SITE",
         color="black",
         weight="bold",
         ha="center",
-        fontsize=11,
+        fontsize=10,
         zorder=10
     )
 
-    ingress_line = mlines.Line2D([], [], color="#e74c3c", linewidth=2.5, label="Ingress Route")
-    egress_line = mlines.Line2D([], [], color="#27ae60", linewidth=2.5, label="Egress Route")
+    # Legend
+    ingress_line = mlines.Line2D([], [], color="#e74c3c", linewidth=2.2, label="Ingress")
+    egress_line = mlines.Line2D([], [], color="#27ae60", linewidth=2.2, label="Egress")
 
     ax.legend(
         handles=[ingress_line, egress_line],
         loc="lower right",
         frameon=True,
         facecolor="white",
-        edgecolor="black"
+        edgecolor="black",
+        fontsize=9
     )
 
     ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
     ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
 
     ax.set_title(
-        f"SITE ANALYSIS - Driving Distance (LOT {lot_id})",
-        fontsize=16,
+        "SITE ANALYSIS - Driving Distance",
+        fontsize=14,
         weight="bold"
     )
 
@@ -275,7 +261,7 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=130)  # reduced DPI
     plt.close(fig)
 
     return buffer
