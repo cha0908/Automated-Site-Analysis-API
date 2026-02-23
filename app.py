@@ -1,5 +1,6 @@
 import matplotlib
 matplotlib.use("Agg")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, validator
@@ -17,7 +18,7 @@ from reportlab.lib.units import inch
 from fastapi.middleware.cors import CORSMiddleware
 
 # -----------------------------------------------------
-# IMPORT MODULES (UPDATED TO ACCEPT lon, lat)
+# IMPORT MODULES
 # -----------------------------------------------------
 
 from modules.walking import generate_walking
@@ -33,7 +34,7 @@ from modules.noise import generate_noise
 
 app = FastAPI(
     title="Automated Site Analysis API",
-    version="3.0"
+    version="4.0"
 )
 
 # -----------------------------------------------------
@@ -58,17 +59,13 @@ logging.basicConfig(
 )
 
 # -----------------------------------------------------
-# ALLOWED INPUT TYPES
+# INPUT TYPES
 # -----------------------------------------------------
 
 ALLOWED_TYPES = {
     "LOT","STT","GLA","LPP","UN",
     "BUILDINGCSUID","LOTCSUID","PRN"
 }
-
-# -----------------------------------------------------
-# REQUEST MODEL
-# -----------------------------------------------------
 
 class AnalysisRequest(BaseModel):
     value: str
@@ -81,17 +78,18 @@ class AnalysisRequest(BaseModel):
         return v.upper()
 
 # -----------------------------------------------------
-# CACHE STORE
+# SIMPLE MEMORY SAFE CACHE
 # -----------------------------------------------------
 
 CACHE_STORE = {}
+MAX_CACHE = 10
 
 def cache_key(value: str, data_type: str, analysis_type: str):
     raw = f"{value}_{data_type}_{analysis_type}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 # -----------------------------------------------------
-# LOAD STATIC DATA
+# LOAD STATIC DATA (ONLY ONCE)
 # -----------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,7 +112,7 @@ BUILDING_DATA = BUILDING_DATA[BUILDING_DATA["HEIGHT_M"] > 5]
 print("Startup complete.")
 
 # -----------------------------------------------------
-# CENTRAL LOCATION RESOLVER
+# LOCATION RESOLVER
 # -----------------------------------------------------
 
 def resolve_location(search_value: str, data_type: str):
@@ -144,16 +142,12 @@ def resolve_location(search_value: str, data_type: str):
     return lon, lat
 
 # -----------------------------------------------------
-# IMAGE RESPONSE
+# RESPONSE HELPERS
 # -----------------------------------------------------
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="image/png")
-
-# -----------------------------------------------------
-# GENERIC WRAPPER
-# -----------------------------------------------------
 
 def run_analysis(value: str, data_type: str, analysis_type: str, func, *args):
 
@@ -166,9 +160,16 @@ def run_analysis(value: str, data_type: str, analysis_type: str, func, *args):
         logging.info(f"{analysis_type.upper()} cache hit")
         return CACHE_STORE[key]
 
-    result = func(*args)
+    try:
+        result = func(*args)
+    except Exception as e:
+        logging.error(f"{analysis_type} failed: {str(e)}")
+        raise
 
     CACHE_STORE[key] = result
+
+    if len(CACHE_STORE) > MAX_CACHE:
+        CACHE_STORE.clear()
 
     duration = round(time.time() - start, 2)
     logging.info(f"{analysis_type.upper()} completed in {duration}s")
@@ -239,7 +240,7 @@ def noise(req: AnalysisRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------
-# PDF REPORT
+# FULL PDF REPORT (ALL ANALYSIS)
 # -----------------------------------------------------
 
 def generate_pdf_report(value: str, data_type: str):
@@ -251,15 +252,20 @@ def generate_pdf_report(value: str, data_type: str):
 
     elements = []
 
-    view_img = generate_view(lon, lat, BUILDING_DATA)
-    noise_img = generate_noise(lon, lat)
+    # Generate all outputs
+    outputs = [
+        generate_context(lon, lat, ZONE_DATA),
+        generate_transport(lon, lat),
+        generate_walking(lon, lat),
+        generate_driving(lon, lat, ZONE_DATA),
+        generate_view(lon, lat, BUILDING_DATA),
+        generate_noise(lon, lat)
+    ]
 
-    view_img.seek(0)
-    noise_img.seek(0)
-
-    elements.append(RLImage(view_img, width=6*inch, height=4*inch))
-    elements.append(Spacer(1, 0.5*inch))
-    elements.append(RLImage(noise_img, width=6*inch, height=4*inch))
+    for img in outputs:
+        img.seek(0)
+        elements.append(RLImage(img, width=6*inch, height=4*inch))
+        elements.append(Spacer(1, 0.4*inch))
 
     doc.build(elements)
 
