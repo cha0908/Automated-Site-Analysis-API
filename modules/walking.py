@@ -57,7 +57,7 @@ def generate_walking(data_type: str, value: str):
 
     G_walk = ox.graph_from_point(
         (lat, lon),
-        dist=3000,
+        dist=1500,
         network_type="walk"
     )
 
