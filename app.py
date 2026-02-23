@@ -234,39 +234,44 @@ def generate_pdf_report(data_type: str, value: str):
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
+
     elements = []
 
+    logging.info("Generating report images...")
+
+    # --------------------------------------------------
+    # GENERATE ALL ANALYSIS IMAGES
+    # --------------------------------------------------
+
+    walking_img = generate_walking(data_type, value)
+    driving_img = generate_driving(data_type, value, ZONE_DATA)
+    transport_img = generate_transport(data_type, value)
+    context_img = generate_context(data_type, value, ZONE_DATA)
     view_img = generate_view(data_type, value, BUILDING_DATA)
     noise_img = generate_noise(data_type, value)
 
-    view_img.seek(0)
-    noise_img.seek(0)
+    images = [
+        walking_img,
+        driving_img,
+        transport_img,
+        context_img,
+        view_img,
+        noise_img
+    ]
 
-    elements.append(RLImage(view_img, width=6*inch, height=4*inch))
-    elements.append(Spacer(1, 0.5*inch))
-    elements.append(RLImage(noise_img, width=6*inch, height=4*inch))
+    # --------------------------------------------------
+    # ADD TO PDF
+    # --------------------------------------------------
+
+    for img_buffer in images:
+        img_buffer.seek(0)
+        elements.append(RLImage(img_buffer, width=6*inch, height=4.5*inch))
+        elements.append(Spacer(1, 0.6*inch))
 
     doc.build(elements)
 
     buffer.seek(0)
     return buffer
-
-@app.post("/report")
-def report(req: LocationRequest):
-    try:
-        logging.info(f"Generating PDF report for {req.data_type} {req.value}")
-
-        pdf_buffer = generate_pdf_report(req.data_type, req.value)
-
-        return StreamingResponse(
-            pdf_buffer,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=site_report.pdf"
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------
 # HEALTH CHECK
