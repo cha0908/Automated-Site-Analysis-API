@@ -2,13 +2,14 @@ import osmnx as ox
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
-import requests
 import pandas as pd
 
 from shapely.geometry import Point, Polygon
-from pyproj import Transformer
 from matplotlib.patches import Wedge, Patch
 from io import BytesIO
+
+# ✅ IMPORT UNIVERSAL RESOLVER
+from modules.resolver import resolve_location
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -21,39 +22,13 @@ SECTOR_SIZE = 20
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
-# ------------------------------------------------------------
-
-def resolve_lot(lot_id: str):
-
-    url = f"https://mapapi.geodata.gov.hk/gs/api/v1.0.0/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-    r = requests.get(url)
-
-    if r.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = r.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x["score"])
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(2326, 4326, always_xy=True).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
+def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame):
 
-    lon, lat = resolve_lot(lot_id)
+    # ✅ Dynamic resolver
+    lon, lat = resolve_location(data_type, value)
 
     # --------------------------------------------------------
     # SITE POLYGON
@@ -238,7 +213,7 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
         merged.pop()
 
     # --------------------------------------------------------
-    # DRAW VIEW ARCS + LABELS
+    # DRAW VIEW ARCS
     # --------------------------------------------------------
 
     color_map = {
@@ -249,7 +224,6 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
     }
 
     for start, end, view_type in merged:
-
         arc = Wedge(
             (center.x, center.y),
             VIEW_RADIUS,
@@ -316,7 +290,13 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
         fontsize=9
     )
 
-    ax.set_title(f"SITE ANALYSIS – View Analysis ({lot_id})", fontsize=16, weight="bold")
+    # ✅ UPDATED TITLE
+    ax.set_title(
+        f"SITE ANALYSIS – View Analysis ({data_type} {value})",
+        fontsize=16,
+        weight="bold"
+    )
+
     ax.set_axis_off()
 
     buffer = BytesIO()
