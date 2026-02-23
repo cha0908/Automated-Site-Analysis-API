@@ -3,12 +3,13 @@ import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
 import networkx as nx
-import requests
 import numpy as np
 
 from shapely.geometry import Point
-from pyproj import Transformer
 from io import BytesIO
+
+# ✅ IMPORT UNIVERSAL RESOLVER
+from modules.resolver import resolve_location
 
 ox.settings.log_console = False
 ox.settings.use_cache = True
@@ -18,43 +19,13 @@ MAP_EXTENT = 2000
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
-# ------------------------------------------------------------
-
-def resolve_lot(lot_id: str):
-
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_walking(lot_id: str):
+def generate_walking(data_type: str, value: str):
 
-    lon, lat = resolve_lot(lot_id)
+    # ✅ Dynamic resolver
+    lon, lat = resolve_location(data_type, value)
 
     # --------------------------------------------------------
     # GET SITE FOOTPRINT
@@ -273,8 +244,9 @@ def generate_walking(lot_id: str):
         alpha=0.4
     )
 
+    # ✅ UPDATED TITLE
     ax.set_title(
-        f"Walking Accessibility - LOT {lot_id}",
+        f"Walking Accessibility - {data_type} {value}",
         fontsize=15,
         weight="bold"
     )
