@@ -1,3 +1,5 @@
+import matplotlib
+matplotlib.use("Agg")
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, validator
