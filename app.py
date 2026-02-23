@@ -11,6 +11,7 @@ from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
 from fastapi.middleware.cors import CORSMiddleware
+
 # -----------------------------------------------------
 # IMPORT MODULES
 # -----------------------------------------------------
@@ -28,19 +29,19 @@ from modules.noise import generate_noise
 
 app = FastAPI(
     title="Automated Site Analysis API",
-    version="2.0"
+    version="3.0"
 )
 
 # -----------------------------------------------------
-# CORS CONFIGURATION (ALLOW ALL ORIGINS)
+# CORS CONFIGURATION
 # -----------------------------------------------------
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],      # Allow all domains
-    allow_credentials=False,  # Must be False when using "*"
-    allow_methods=["*"],      # Allow all HTTP methods
-    allow_headers=["*"],      # Allow all headers
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # -----------------------------------------------------
@@ -53,24 +54,24 @@ logging.basicConfig(
 )
 
 # -----------------------------------------------------
-# CACHE STORE (FREE TIER SAFE)
+# CACHE STORE
 # -----------------------------------------------------
 
 CACHE_STORE = {}
 
-def cache_key(lot_id: str, analysis_type: str):
-    raw = f"{lot_id}_{analysis_type}"
+def cache_key(data_type: str, value: str, analysis_type: str):
+    raw = f"{data_type}_{value}_{analysis_type}"
     return hashlib.md5(raw.encode()).hexdigest()
 
 # -----------------------------------------------------
-# LOAD STATIC DATA ONCE
+# LOAD STATIC DATA
 # -----------------------------------------------------
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
 ZONE_PATH = os.path.join(DATA_DIR, "ZONE_REDUCED.gpkg")
-BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")  # removed extra space
+BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL.gpkg")
 
 print("Loading zoning dataset...")
 ZONE_DATA = gpd.read_file(ZONE_PATH).to_crs(3857)
@@ -91,26 +92,27 @@ print("Startup complete.")
 # REQUEST MODEL
 # -----------------------------------------------------
 
-class LotRequest(BaseModel):
-    lot_id: str
+class LocationRequest(BaseModel):
+    data_type: str
+    value: str
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="image/png")
 
 # -----------------------------------------------------
-# GENERIC WRAPPER (Logging + Timing + Cache)
+# GENERIC WRAPPER
 # -----------------------------------------------------
 
-def run_analysis(lot_id: str, analysis_type: str, func, *args):
+def run_analysis(data_type: str, value: str, analysis_type: str, func, *args):
 
-    logging.info(f"Incoming {analysis_type.upper()} request for lot {lot_id}")
+    logging.info(f"Incoming {analysis_type.upper()} request for {data_type} {value}")
     start = time.time()
 
-    key = cache_key(lot_id, analysis_type)
+    key = cache_key(data_type, value, analysis_type)
 
     if key in CACHE_STORE:
-        logging.info(f"{analysis_type.upper()} cache hit for {lot_id}")
+        logging.info(f"{analysis_type.upper()} cache hit for {data_type} {value}")
         return CACHE_STORE[key]
 
     result = func(*args)
@@ -127,13 +129,15 @@ def run_analysis(lot_id: str, analysis_type: str, func, *args):
 # -----------------------------------------------------
 
 @app.post("/walking")
-def walking(req: LotRequest):
+def walking(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "walking",
             generate_walking,
-            req.lot_id
+            req.data_type,
+            req.value
         )
         return image_response(img)
     except Exception as e:
@@ -141,13 +145,15 @@ def walking(req: LotRequest):
 
 
 @app.post("/driving")
-def driving(req: LotRequest):
+def driving(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "driving",
             generate_driving,
-            req.lot_id,
+            req.data_type,
+            req.value,
             ZONE_DATA
         )
         return image_response(img)
@@ -156,13 +162,15 @@ def driving(req: LotRequest):
 
 
 @app.post("/transport")
-def transport(req: LotRequest):
+def transport(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "transport",
             generate_transport,
-            req.lot_id
+            req.data_type,
+            req.value
         )
         return image_response(img)
     except Exception as e:
@@ -170,13 +178,15 @@ def transport(req: LotRequest):
 
 
 @app.post("/context")
-def context(req: LotRequest):
+def context(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "context",
             generate_context,
-            req.lot_id,
+            req.data_type,
+            req.value,
             ZONE_DATA
         )
         return image_response(img)
@@ -185,13 +195,15 @@ def context(req: LotRequest):
 
 
 @app.post("/view")
-def view(req: LotRequest):
+def view(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "view",
             generate_view,
-            req.lot_id,
+            req.data_type,
+            req.value,
             BUILDING_DATA
         )
         return image_response(img)
@@ -200,31 +212,32 @@ def view(req: LotRequest):
 
 
 @app.post("/noise")
-def noise(req: LotRequest):
+def noise(req: LocationRequest):
     try:
         img = run_analysis(
-            req.lot_id,
+            req.data_type,
+            req.value,
             "noise",
             generate_noise,
-            req.lot_id
+            req.data_type,
+            req.value
         )
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------
-# PDF REPORT ENDPOINT
+# PDF REPORT
 # -----------------------------------------------------
 
-def generate_pdf_report(lot_id: str):
+def generate_pdf_report(data_type: str, value: str):
 
     buffer = BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=A4)
-
     elements = []
 
-    view_img = generate_view(lot_id, BUILDING_DATA)
-    noise_img = generate_noise(lot_id)
+    view_img = generate_view(data_type, value, BUILDING_DATA)
+    noise_img = generate_noise(data_type, value)
 
     view_img.seek(0)
     noise_img.seek(0)
@@ -239,10 +252,11 @@ def generate_pdf_report(lot_id: str):
     return buffer
 
 @app.post("/report")
-def report(req: LotRequest):
+def report(req: LocationRequest):
     try:
-        logging.info(f"Generating PDF report for {req.lot_id}")
-        pdf_buffer = generate_pdf_report(req.lot_id)
+        logging.info(f"Generating PDF report for {req.data_type} {req.value}")
+
+        pdf_buffer = generate_pdf_report(req.data_type, req.value)
 
         return StreamingResponse(
             pdf_buffer,
@@ -260,4 +274,4 @@ def report(req: LotRequest):
 
 @app.get("/")
 def root():
-    return {"status": "Automated Site Analysis API Running"}
+    return {"status": "Automated Site Analysis API Running - Multi Identifier Enabled"}
