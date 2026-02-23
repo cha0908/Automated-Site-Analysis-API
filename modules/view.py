@@ -2,62 +2,32 @@ import osmnx as ox
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import numpy as np
-import requests
 import pandas as pd
 
 from shapely.geometry import Point, Polygon
-from pyproj import Transformer
 from matplotlib.patches import Wedge, Patch
 from io import BytesIO
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
 
-FETCH_RADIUS = 1500
-MAP_RADIUS = 800
-VIEW_RADIUS = 360
-ARC_WIDTH = 40
-SECTOR_SIZE = 20
+# ------------------------------------------------------------
+# OPTIMIZED SETTINGS
+# ------------------------------------------------------------
+
+FETCH_RADIUS = 1100   # reduced from 1500
+MAP_RADIUS = 700      # reduced slightly
+VIEW_RADIUS = 330
+ARC_WIDTH = 35
+SECTOR_SIZE = 30      # fewer sectors (was 20)
+HEIGHT_LABEL_LIMIT = 15  # reduced labels
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
+# MAIN GENERATOR (UPDATED + OPTIMIZED)
 # ------------------------------------------------------------
 
-def resolve_lot(lot_id: str):
-
-    url = f"https://mapapi.geodata.gov.hk/gs/api/v1.0.0/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-    r = requests.get(url)
-
-    if r.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = r.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x["score"])
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(2326, 4326, always_xy=True).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
-# MAIN GENERATOR
-# ------------------------------------------------------------
-
-def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
-
-    lon, lat = resolve_lot(lot_id)
-
-    # --------------------------------------------------------
-    # SITE POLYGON
-    # --------------------------------------------------------
+def generate_view(lon: float, lat: float, BUILDING_DATA: gpd.GeoDataFrame):
 
     site_building = ox.features_from_point(
         (lat, lon),
@@ -72,17 +42,24 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
             .geometry.iloc[0]
         )
     else:
-        site_geom = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0].buffer(25)
+        site_geom = gpd.GeoSeries(
+            [Point(lon, lat)],
+            crs=4326
+        ).to_crs(3857).iloc[0].buffer(25)
 
     center = site_geom.centroid
     analysis_circle = center.buffer(MAP_RADIUS)
 
     # --------------------------------------------------------
-    # CONTEXT DATA
+    # FETCH CONTEXT (CLIPPED EARLY)
     # --------------------------------------------------------
 
     def fetch_layer(tags):
-        gdf = ox.features_from_point((lat, lon), dist=FETCH_RADIUS, tags=tags).to_crs(3857)
+        gdf = ox.features_from_point(
+            (lat, lon),
+            dist=FETCH_RADIUS,
+            tags=tags
+        ).to_crs(3857)
         return gdf[gdf.intersects(analysis_circle)]
 
     buildings = fetch_layer({"building": True})
@@ -92,10 +69,11 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
     nearby = BUILDING_DATA[BUILDING_DATA.intersects(analysis_circle)].copy()
 
     # --------------------------------------------------------
-    # CREATE FIGURE
+    # FIGURE (SMALLER)
     # --------------------------------------------------------
 
-    fig, ax = plt.subplots(figsize=(12,12))
+    fig, ax = plt.subplots(figsize=(10,10))
+
     ax.set_facecolor("#f2f2f2")
     ax.set_xlim(center.x - MAP_RADIUS, center.x + MAP_RADIUS)
     ax.set_ylim(center.y - MAP_RADIUS, center.y + MAP_RADIUS)
@@ -107,7 +85,8 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
     if len(water):
         water.plot(ax=ax, color="#6bb6d9", edgecolor="none", zorder=2)
 
-    buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)
+    if len(buildings):
+        buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)
 
     # --------------------------------------------------------
     # RADIAL GUIDES
@@ -119,44 +98,18 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
             [center.x, center.x + MAP_RADIUS*np.cos(rad)],
             [center.y, center.y + MAP_RADIUS*np.sin(rad)],
             linestyle=(0,(2,4)),
-            linewidth=0.8,
+            linewidth=0.7,
             color="#d49a2a",
-            alpha=0.35,
+            alpha=0.3,
             zorder=4
         )
 
     # --------------------------------------------------------
-    # MPD RINGS
-    # --------------------------------------------------------
-
-    for d in [80,160,200]:
-        circle = center.buffer(d)
-        gpd.GeoSeries([circle], crs=3857).boundary.plot(
-            ax=ax,
-            linestyle=(0,(4,4)),
-            linewidth=1.2,
-            color="#555555",
-            alpha=0.9,
-            zorder=5
-        )
-
-        ax.text(
-            center.x + d,
-            center.y,
-            f"{d} mPD",
-            fontsize=8,
-            weight="bold",
-            color="white",
-            bbox=dict(facecolor="black", edgecolor="none", pad=2),
-            zorder=6
-        )
-
-    # --------------------------------------------------------
-    # SECTOR CREATION
+    # SECTOR ANALYSIS (FEWER POINTS)
     # --------------------------------------------------------
 
     def create_sector(start_angle, end_angle):
-        angles = np.linspace(start_angle, end_angle, 40)
+        angles = np.linspace(start_angle, end_angle, 20)  # reduced resolution
         points = [(center.x, center.y)]
         for angle in angles:
             rad = np.radians(angle)
@@ -191,7 +144,7 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
     df = pd.DataFrame(sector_data)
 
     # --------------------------------------------------------
-    # NORMALIZATION + SCORING
+    # NORMALIZATION
     # --------------------------------------------------------
 
     def normalize(series):
@@ -213,32 +166,7 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
     df["view"] = df["view"].str.replace("_score","").str.upper()
 
     # --------------------------------------------------------
-    # MERGE SECTORS
-    # --------------------------------------------------------
-
-    merged = []
-    current_start = df.iloc[0]["start"]
-    current_end = df.iloc[0]["end"]
-    current_type = df.iloc[0]["view"]
-
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        if row["view"] == current_type:
-            current_end = row["end"]
-        else:
-            merged.append((current_start, current_end, current_type))
-            current_start = row["start"]
-            current_end = row["end"]
-            current_type = row["view"]
-
-    merged.append((current_start, current_end, current_type))
-
-    if merged[0][2] == merged[-1][2]:
-        merged[0] = (merged[-1][0], merged[0][1], merged[0][2])
-        merged.pop()
-
-    # --------------------------------------------------------
-    # DRAW VIEW ARCS + LABELS
+    # DRAW ARCS
     # --------------------------------------------------------
 
     color_map = {
@@ -248,37 +176,37 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
         "OPEN": "#f0a25a"
     }
 
-    for start, end, view_type in merged:
+    for _, row in df.iterrows():
 
         arc = Wedge(
             (center.x, center.y),
             VIEW_RADIUS,
-            start,
-            end,
+            row["start"],
+            row["end"],
             width=ARC_WIDTH,
-            facecolor=color_map[view_type],
+            facecolor=color_map[row["view"]],
             edgecolor="white",
-            linewidth=2,
-            zorder=7
+            linewidth=1.5,
+            zorder=6
         )
         ax.add_patch(arc)
 
     # --------------------------------------------------------
-    # HEIGHT LABELS
+    # HEIGHT LABELS (LIMITED)
     # --------------------------------------------------------
 
-    top_buildings = nearby.sort_values("HEIGHT_M", ascending=False).head(25)
+    top_buildings = nearby.sort_values("HEIGHT_M", ascending=False).head(HEIGHT_LABEL_LIMIT)
 
     for _, row in top_buildings.iterrows():
         centroid = row.geometry.centroid
         ax.text(
             centroid.x,
             centroid.y,
-            f"{row['HEIGHT_M']:.1f} m",
-            fontsize=7,
+            f"{row['HEIGHT_M']:.0f}m",
+            fontsize=6.5,
             color="white",
-            bbox=dict(facecolor="black", edgecolor="none", pad=1.5),
-            zorder=12
+            bbox=dict(facecolor="black", edgecolor="none", pad=1),
+            zorder=10
         )
 
     # --------------------------------------------------------
@@ -289,11 +217,12 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
         ax=ax,
         facecolor="#e74c3c",
         edgecolor="white",
-        linewidth=1.5,
-        zorder=13
+        linewidth=1.2,
+        zorder=11
     )
 
-    ax.text(center.x, center.y - 35, "SITE", fontsize=12, weight="bold", ha="center", va="top")
+    ax.text(center.x, center.y - 30, "SITE",
+            fontsize=11, weight="bold", ha="center", va="top")
 
     # --------------------------------------------------------
     # LEGEND
@@ -312,16 +241,17 @@ def generate_view(lot_id: str, BUILDING_DATA: gpd.GeoDataFrame):
         frameon=True,
         facecolor="white",
         edgecolor="#444444",
-        framealpha=0.95,
-        fontsize=9
+        fontsize=8
     )
 
-    ax.set_title(f"SITE ANALYSIS – View Analysis ({lot_id})", fontsize=16, weight="bold")
+    ax.set_title("SITE ANALYSIS – View Analysis",
+                 fontsize=14, weight="bold")
+
     ax.set_axis_off()
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=130)  # reduced DPI
     plt.close(fig)
 
     return buffer
