@@ -3,12 +3,13 @@ import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
 import networkx as nx
-import requests
 import matplotlib.lines as mlines
 
 from shapely.geometry import Point, LineString, MultiLineString
-from pyproj import Transformer
 from io import BytesIO
+
+# ✅ IMPORT UNIVERSAL RESOLVER
+from modules.resolver import resolve_location
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -18,43 +19,13 @@ MAP_EXTENT = 1400
 
 
 # ------------------------------------------------------------
-# LOT RESOLVER
-# ------------------------------------------------------------
-
-def resolve_lot(lot_id: str):
-
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-
-    response = requests.get(url)
-
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
-
-# ------------------------------------------------------------
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
+def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
-    lon, lat = resolve_lot(lot_id)
+    # ✅ Dynamic resolver
+    lon, lat = resolve_location(data_type, value)
 
     site_point = gpd.GeoSeries(
         [Point(lon, lat)],
@@ -265,8 +236,9 @@ def generate_driving(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
     ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
 
+    # ✅ UPDATED TITLE
     ax.set_title(
-        f"SITE ANALYSIS - Driving Distance (LOT {lot_id})",
+        f"SITE ANALYSIS - Driving Distance ({data_type} {value})",
         fontsize=16,
         weight="bold"
     )
