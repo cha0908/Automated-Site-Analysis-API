@@ -2,14 +2,11 @@ import osmnx as ox
 import geopandas as gpd
 import matplotlib.pyplot as plt
 import contextily as cx
-import requests
-import networkx as nx
 import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
 
 from shapely.geometry import Point
-from pyproj import Transformer
 from sklearn.cluster import KMeans
 from io import BytesIO
 
@@ -19,38 +16,6 @@ ox.settings.log_console = False
 FETCH_RADIUS = 1500
 MAP_HALF_SIZE = 900
 MTR_COLOR = "#ffd166"
-
-
-# ------------------------------------------------------------
-# LOT RESOLVER
-# ------------------------------------------------------------
-
-def resolve_lot(lot_id: str):
-
-    base_url = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-    url = f"{base_url}/lus/lot/SearchNumber?text={lot_id.replace(' ','%20')}"
-
-    r = requests.get(url)
-
-    if r.status_code != 200:
-        raise ValueError("Failed to resolve lot.")
-
-    data = r.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("Lot not found.")
-
-    best = max(data["candidates"], key=lambda x: x["score"])
-
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon, lat = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
-    return lon, lat
-
 
 # ------------------------------------------------------------
 # HELPERS
@@ -75,14 +40,11 @@ def context_rules(site_type):
         return {"amenity":["school","college","hospital"],"leisure":["park"]}
     return {"amenity":True,"leisure":True}
 
-
 # ------------------------------------------------------------
-# MAIN GENERATOR
+# MAIN GENERATOR (UPDATED)
 # ------------------------------------------------------------
 
-def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
-
-    lon, lat = resolve_lot(lot_id)
+def generate_context(lon: float, lat: float, ZONE_DATA: gpd.GeoDataFrame):
 
     site_point = gpd.GeoSeries(
         [Point(lon, lat)],
@@ -90,7 +52,7 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     ).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
-    # ZONING (USING PRELOADED DATA)
+    # ZONING
     # --------------------------------------------------------
 
     ozp = ZONE_DATA.to_crs(3857)
@@ -146,7 +108,9 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     stations = ox.features_from_point(
-        (lat, lon), tags={"railway":"station"}, dist=2000
+        (lat, lon),
+        tags={"railway":"station"},
+        dist=2000
     ).to_crs(3857)
 
     if not stations.empty:
@@ -160,7 +124,9 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     bus_stops = ox.features_from_point(
-        (lat, lon), tags={"highway":"bus_stop"}, dist=900
+        (lat, lon),
+        tags={"highway":"bus_stop"},
+        dist=900
     ).to_crs(3857)
 
     if len(bus_stops) > 6:
@@ -173,7 +139,9 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     labels = ox.features_from_point(
-        (lat, lon), dist=800, tags=LABEL_RULES
+        (lat, lon),
+        dist=800,
+        tags=LABEL_RULES
     ).to_crs(3857)
 
     labels["label"] = labels.get("name:en").fillna(labels.get("name"))
@@ -202,13 +170,7 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
         bus_stops.plot(ax=ax,color="#0d47a1",markersize=35,zorder=9)
 
     if not stations.empty:
-        stations.plot(
-            ax=ax,
-            facecolor=MTR_COLOR,
-            edgecolor="none",
-            alpha=0.9,
-            zorder=10
-        )
+        stations.plot(ax=ax,facecolor=MTR_COLOR,edgecolor="none",alpha=0.9,zorder=10)
 
     site_gdf.plot(ax=ax,facecolor="#e53935",edgecolor="darkred",linewidth=2,zorder=11)
 
@@ -216,12 +178,11 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
             color="white",weight="bold",ha="center",va="center",zorder=12)
 
     # --------------------------------------------------------
-    # INFO BOX
+    # INFO BOX (UPDATED)
     # --------------------------------------------------------
 
     ax.text(
         0.015,0.985,
-        f"Lot: {lot_id}\n"
         f"OZP Plan: {primary['PLAN_NO']}\n"
         f"Zoning: {zone}\n"
         f"Site Type: {SITE_TYPE}\n",
@@ -255,7 +216,7 @@ def generate_context(lot_id: str, ZONE_DATA: gpd.GeoDataFrame):
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=130)  # reduced resolution for speed
     plt.close(fig)
 
     return buffer
