@@ -272,6 +272,23 @@ def generate_pdf_report(data_type: str, value: str):
 
     buffer.seek(0)
     return buffer
+    
+@app.post("/report")
+def report(req: LocationRequest):
+    try:
+        logging.info(f"Generating FULL PDF report for {req.data_type} {req.value}")
+
+        pdf_buffer = generate_pdf_report(req.data_type, req.value)
+
+        return StreamingResponse(
+            pdf_buffer,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": "attachment; filename=site_analysis_report.pdf"
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------
 # HEALTH CHECK
