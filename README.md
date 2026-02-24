@@ -1,82 +1,57 @@
 <p>
-  <img src="images/alkf-logo.png" width="140" align="left">
+  <img src="public/logo.png" width="140" align="left">
 </p>
 
 <h1 style="margin-top:0;">
-AUTOMATED SPATIAL INTELLIGENCE SYSTEM API – ALKF+
+Computational Geospatial Intelligence Framework
 </h1>
+
 <hr>
 
-# Executive Overview
+# Executive Summary
 
-**Automated Site Analysis – ALKF** is a modular geospatial intelligence system designed to automate professional urban feasibility assessment.
+The **Computational Geospatial Intelligence Framework (CGIF)** is a modular Python-based spatial analysis system designed for automated urban feasibility assessment, spatial network modelling, environmental simulation, and multi-layer geospatial intelligence computation.
 
-The system converts raw geographic data into high-quality analytical maps and reports through:
+This framework integrates:
 
-- Spatial network analysis
-- Environmental modelling
-- View sector classification
-- Density & zoning intelligence
-- Traffic noise propagation modelling
-- Automated visualization pipelines
-- Cloud-deployed API microservice architecture
+- Network-based accessibility modelling
+- Multi-scale spatial analytics
+- Environmental noise propagation modelling
+- 360° view sector classification
+- Zoning and density intelligence
+- Automated geospatial visualization pipelines
 
-Built for urban planners, architects, developers, and infrastructure consultants.
+The system is structured as a computational GIS engine rather than a web application, enabling reproducible, high-performance spatial analysis workflows.
 
 ---
 
 # System Architecture
 
-## End-to-End Processing Flow
+## Computational Pipeline
 
 ```mermaid
 flowchart TD
 
-A[User Request - LOT ID] --> B[FastAPI Endpoint]
-B --> C[Government GIS Resolver API]
-C --> D[Coordinate Transformation EPSG 2326 → 4326 → 3857]
+A[Lot Identifier / Coordinate Input]
+--> B[Coordinate Resolution & CRS Transformation]
 
-D --> E[Data Layer]
+B --> C[Static Dataset Loader]
+C --> C1[Buildings Dataset]
+C --> C2[Zoning Dataset]
+C --> C3[OSM Network Extraction]
 
-E --> E1[Zoning Dataset]
-E --> E2[Building Height Dataset]
-E --> E3[OpenStreetMap Extraction]
+C --> D[Spatial Analysis Engine]
 
-E --> F[Spatial Analysis Engine]
+D --> D1[Walking Network Analysis]
+D --> D2[Driving Distance Analysis]
+D --> D3[Transport Network Mapping]
+D --> D4[Context & Zoning Overlay]
+D --> D5[360° View Sector Classification]
+D --> D6[Traffic Noise Propagation Model]
 
-F --> F1[Walking Analysis]
-F --> F2[Driving Analysis]
-F --> F3[Transport Network]
-F --> F4[Context Mapping]
-F --> F5[View Sector Scoring]
-F --> F6[Noise Modelling]
-
-F --> G[Visualization Engine]
-
-G --> H[PNG Output]
-G --> I[PDF Report Generator]
-
-H --> J[Streaming Response]
-I --> J
-```
-
----
-
-## Cloud Execution Flow
-
-```mermaid
-flowchart LR
-
-Client --> Render
-Render --> Uvicorn
-Uvicorn --> FastAPI
-FastAPI --> LoggingLayer
-FastAPI --> CacheLayer
-FastAPI --> Modules
-Modules --> GeoPandas
-Modules --> OSMnx
-Modules --> StaticDatasets
-FastAPI --> Output
+D --> E[Visualization Engine]
+E --> F[PNG Outputs]
+E --> G[Report Generation]
 ```
 
 ---
@@ -84,107 +59,118 @@ FastAPI --> Output
 # Repository Structure
 
 ```
-Automated-Site-Analysis-API/
+Computational-Geospatial-Intelligence-Framework/
 │
-├── app.py
-├── render.yaml
-├── requirements.txt
-├── runtime.txt
+├── MULTIPLE INPUT/
+│   ├── automated_site_analysis.py
+│   ├── Competing Developments Analysis.py
+│   ├── Driving Distance Analysis.py
+│   ├── Road Traffic Noise Impact.py
+│   ├── Surrounding Amenities & Land Use Context.py
+│   ├── Transportation Network Analysis.py
+│   ├── Walking Distance.py
+│   │
+│   └── outputs/
+│       ├── *.png (Generated analytical maps)
 │
-├── data/
-│   ├── BUILDINGS_FINAL.gpkg
-│   └── ZONE_REDUCED.gpkg
-│
-├── modules/
-│   ├── walking.py
-│   ├── driving.py
-│   ├── transport.py
-│   ├── context.py
-│   ├── view.py
-│   └── noise.py
+├── README.md
+```
+
+The framework operates as a modular spatial analysis engine where each script represents an independent computational component.
+
+---
+
+# Core Analytical Modules
+
+---
+
+## 1. Walking Accessibility Analysis
+
+### Objective
+Evaluate pedestrian connectivity to nearby amenities using graph-based routing.
+
+### Computational Methods
+
+- OSMnx walk graph extraction
+- NetworkX shortest path computation
+- Service area buffer generation
+- Amenity density clustering
+
+### Core Algorithm
+
+```
+ShortestPath(G, source, target)
+ServiceArea = Nodes within threshold distance
 ```
 
 ---
 
-# Module Breakdown
+## 2. Driving Distance Analysis
 
----
+### Objective
+Assess vehicular accessibility and travel-time reach.
 
-## Walking Accessibility Analysis
+### Methods
 
-**Purpose:**  
-Evaluate pedestrian connectivity to nearby amenities.
-
-**Core Methods:**
-- OSMnx walk graph extraction
-- NetworkX shortest path routing
-- Amenity clustering
-- Service buffer generation
-
----
-
-## Driving Distance Analysis
-
-**Purpose:**  
-Assess vehicular reach and connectivity efficiency.
-
-**Methodology:**
-- Drive network extraction
-- Travel-time weighted edges
-- Isochrone mapping
+- Drive network graph extraction
+- Edge weighting by travel time
+- Isochrone polygon generation
 - Centrality scoring
 
 ---
 
-## Transportation Network Analysis
+## 3. Transportation Network Analysis
 
-**Purpose:**  
-Evaluate public transit accessibility.
+### Objective
+Quantify public transit accessibility.
 
-**Features:**
-- Bus stop mapping
-- Transit node density
-- Route proximity scoring
+### Includes
+
+- Bus stop spatial indexing
+- Node density scoring
+- Route proximity modelling
+- Transit coverage visualization
 
 ---
 
-## Context & Zoning Mapping
+## 4. Context & Land Use Intelligence
 
-**Purpose:**  
-Analyze surrounding land-use patterns.
+### Objective
+Analyze surrounding zoning and land-use structure.
 
-**Includes:**
-- Zoning overlay
-- Amenity distribution
-- Green space mapping
+### Methods
+
+- Polygon intersection via GeoPandas
+- Amenity spatial distribution
+- Green space ratio computation
 - Density estimation
 
 ---
 
-## 360° View Classification Engine
+## 5. 360° View Sector Classification Engine
 
 ### Methodology
 
-1. Divide 360° into equal sectors  
-2. Compute per sector:
-   - Green ratio
-   - Water ratio
-   - Building density
+1. Divide 360° into equal angular sectors  
+2. For each sector compute:
+   - Green coverage ratio
+   - Water coverage ratio
+   - Built-up density
    - Average building height  
-3. Normalize all features  
-4. Apply scoring model  
-5. Merge adjacent sectors  
+3. Normalize feature values  
+4. Apply weighted scoring model  
+5. Merge adjacent sectors with identical classification  
 
 ### Scoring Model
 
 ```
-Green Score  = green_ratio
-Water Score  = water_ratio
-City Score   = height_norm × density_norm
-Open Score   = (1 - density_norm) × (1 - height_norm)
+Green  = green_ratio
+Water  = water_ratio
+City   = height_norm × density_norm
+Open   = (1 - height_norm) × (1 - density_norm)
 ```
 
-### Output Types
+### Output Categories
 
 - GREEN VIEW
 - WATER VIEW
@@ -193,180 +179,139 @@ Open Score   = (1 - density_norm) × (1 - height_norm)
 
 ---
 
-## Road Traffic Noise Model
+## 6. Road Traffic Noise Propagation Model
 
-### Base Model
+### Base Acoustic Model
 
 ```
 L = L₀ − 20 log₁₀(r)
 ```
 
 Where:
+
 - L₀ = Source emission level  
-- r = Distance from source  
+- r  = Distance from source  
 
-Extended to include:
+### Extended Adjustments
 
-- Heavy vehicle correction
-- Barrier attenuation
-- Ground absorption
-- Reflection adjustment
-- Grid-based propagation modelling
+```
+L_total =
+    L
+  + HeavyVehicleFactor
+  - BarrierAttenuation
+  - GroundAbsorption
+  + ReflectionCorrection
+```
 
----
+### Simulation Design
 
-# Implementation Stages
-
-| Stage | Description | Status |
-|--------|------------|--------|
-| Stage 1 | Multi-Type Input Resolver | ✅ Completed |
-| Stage 2 | OSM Data Integration | ✅ Completed |
-| Stage 3 | Network Graph Engine | ✅ Completed |
-| Stage 4 | View Sector Model | ✅ Completed |
-| Stage 5 | Noise Propagation Model | ✅ Completed |
-| Stage 6 | Visualization Pipeline | ✅ Completed |
-| Stage 7 | Dataset Optimization | ✅ Completed |
-| Stage 8 | Modular API Refactor | ✅ Completed |
-| Stage 9 | Render Cloud Deployment | ✅ Completed |
-| Stage 10 | Caching & Logging Layer | ✅ Completed |
-| Stage 11 | PDF Report Generator | ✅ Completed |
+- Grid-based propagation (10m resolution)
+- Road emission weighting
+- Spatial decay modelling
+- Heatmap visualization
 
 ---
 
-# API Endpoints
+# Data & CRS Strategy
 
-POST `/walking`  
-POST `/driving`  
-POST `/transport`  
-POST `/context`  
-POST `/view`  
-POST `/noise`  
-POST `/report`  
+### Coordinate System Workflow
+
+- Input CRS: EPSG:2326
+- Geographic: EPSG:4326
+- Analysis CRS: EPSG:3857
+
+All spatial datasets standardized to EPSG:3857 for computational consistency.
 
 ---
 
-## Request Format
+# Performance Optimization Strategy
 
-```json
-{
-  "lot_id": "IL 1657"
-}
+- Dataset reduction & attribute pruning
+- Precomputed building height columns
+- Vectorized GeoPandas operations
+- Controlled DPI rendering (200)
+- Modular execution isolation
+- Reduced redundant geometry transformations
+
+---
+
+# Execution Instructions
+
+## Install Dependencies
+
+```
+pip install geopandas osmnx networkx shapely pyproj matplotlib numpy pandas contextily scikit-learn reportlab
+```
+
+## Run Individual Modules
+
+Example:
+
+```
+python "MULTIPLE INPUT/Walking Distance.py"
+```
+
+Each module generates PNG outputs in:
+
+```
+MULTIPLE INPUT/outputs/
 ```
 
 ---
 
-## Response Types
+# Output Artifacts
 
-| Endpoint | Output |
-|-----------|--------|
-| walking | PNG Image |
-| driving | PNG Image |
-| transport | PNG Image |
-| context | PNG Image |
-| view | PNG Image |
-| noise | PNG Image |
-| report | Combined PDF |
-
----
-
-# Optimization Strategy
-
-### Dataset Reduction
-- Buildings reduced from 342,000+ rows → 42,000
-- Removed unused attributes
-- Precomputed HEIGHT_M column
-
-### CRS Standardization
-All datasets converted to EPSG:3857
-
-### Startup Preloading
-Static datasets loaded once during API initialization.
-
-### DPI Optimization
-Reduced from 400 → 200 for web efficiency.
-
-### In-Memory Caching
-Avoids recomputation for repeated lot requests.
-
-### Modular Separation
-Each analysis isolated for maintainability and scalability.
+| Module | Output Type |
+|--------|------------|
+| Walking | Accessibility Map (PNG) |
+| Driving | Isochrone Map (PNG) |
+| Transport | Transit Coverage Map (PNG) |
+| Context | Zoning & Land Use Map (PNG) |
+| View | Sector Classification Map (PNG) |
+| Noise | Propagation Heatmap (PNG) |
 
 ---
 
-# Performance Profile
+# Computational Characteristics
 
-| Scenario | Response Time |
-|----------|--------------|
-| Cold Start | 10–15 sec |
-| Normal Request | 5–10 sec |
-| Cached Request | < 1 sec |
+| Scenario | Execution Time |
+|----------|---------------|
+| Single Module Run | 5–15 sec |
+| Full Multi-Module Execution | 30–60 sec |
 
-Optimized for Render Free Plan resource limits.
-
----
-
-# Deployment Configuration
-
-## render.yaml
-
-```yaml
-services:
-  - type: web
-    name: automated-site-analysis-api
-    runtime: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
-    plan: free
-    autoDeploy: true
-```
-
----
-
-# Requirements
-
-```
-fastapi
-uvicorn
-geopandas
-osmnx
-contextily
-shapely
-pyproj
-networkx
-numpy
-pandas
-matplotlib
-requests
-scikit-learn
-reportlab
-```
-
----
-
-# Future Enhancements
-
-- Authentication layer
-- Rate limiting
-- Batch multi-lot processing
-- SaaS dashboard frontend
-- Background job queue
-- Persistent cloud storage
-- Scalable deployment on paid tier
+Performance depends on OSM extraction size and dataset resolution.
 
 ---
 
 # Engineering Significance
 
-This system demonstrates:
+This framework demonstrates:
 
-- Advanced Geospatial Automation
-- Urban Intelligence Modelling
-- Network-Based Routing Systems
-- Environmental Impact Simulation
-- Sector-Based View Classification
-- Modular API Architecture
-- Cloud-Optimized GIS Deployment
+- Advanced computational GIS modelling
+- Multi-layer geospatial intelligence integration
+- Network-based routing systems
+- Environmental impact simulation
+- Sector-based visual intelligence classification
+- Modular geospatial architecture design
+- Reproducible spatial analytics workflow
 
 ---
 
-© ALKF – Automated Geospatial Intelligence System
+# Future Expansion Roadmap
+
+- Batch multi-lot processing
+- Async processing pipeline
+- Parallelized spatial computations
+- Cloud-native deployment layer
+- REST API wrapper (separate repo)
+- Interactive dashboard integration
+
+---
+
+# License
+
+Specify license in LICENSE file.
+
+---
+
+© Computational Geospatial Intelligence Framework
