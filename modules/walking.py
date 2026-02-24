@@ -9,7 +9,7 @@ from shapely.geometry import Point
 from io import BytesIO
 
 # ✅ IMPORT UNIVERSAL RESOLVER
-from modules.resolver import resolve_location
+from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.log_console = False
 ox.settings.use_cache = True
@@ -28,28 +28,34 @@ def generate_walking(data_type: str, value: str):
     lon, lat = resolve_location(data_type, value)
 
     # --------------------------------------------------------
-    # GET SITE FOOTPRINT
+    # GET SITE FOOTPRINT (official lot boundary or OSM fallback)
     # --------------------------------------------------------
 
-    osm_site = ox.features_from_point(
-        (lat, lon),
-        dist=60,
-        tags={"building": True}
-    ).to_crs(3857)
-
-    if len(osm_site):
-        osm_site["area_calc"] = osm_site.geometry.area
-        site_geom = osm_site.sort_values(
-            "area_calc", ascending=False
-        ).geometry.iloc[0]
+    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    if lot_gdf is not None:
+        site_geom = lot_gdf.geometry.iloc[0]
+        site_gdf = lot_gdf
+        site_point = site_geom.centroid
     else:
-        site_geom = gpd.GeoSeries(
-            [Point(lon, lat)],
-            crs=4326
-        ).to_crs(3857).iloc[0].buffer(40)
+        osm_site = ox.features_from_point(
+            (lat, lon),
+            dist=60,
+            tags={"building": True}
+        ).to_crs(3857)
 
-    site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-    site_point = site_geom.centroid
+        if len(osm_site):
+            osm_site["area_calc"] = osm_site.geometry.area
+            site_geom = osm_site.sort_values(
+                "area_calc", ascending=False
+            ).geometry.iloc[0]
+        else:
+            site_geom = gpd.GeoSeries(
+                [Point(lon, lat)],
+                crs=4326
+            ).to_crs(3857).iloc[0].buffer(40)
+
+        site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
+        site_point = site_geom.centroid
 
     # --------------------------------------------------------
     # WALK NETWORK

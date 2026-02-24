@@ -9,7 +9,7 @@ from matplotlib.patches import Wedge, Patch
 from io import BytesIO
 
 # ✅ IMPORT UNIVERSAL RESOLVER
-from modules.resolver import resolve_location
+from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -31,25 +31,30 @@ def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame):
     lon, lat = resolve_location(data_type, value)
 
     # --------------------------------------------------------
-    # SITE POLYGON
+    # SITE POLYGON (official lot boundary or OSM fallback)
     # --------------------------------------------------------
 
-    site_building = ox.features_from_point(
-        (lat, lon),
-        dist=60,
-        tags={"building": True}
-    ).to_crs(3857)
-
-    if len(site_building):
-        site_geom = (
-            site_building.assign(area=site_building.area)
-            .sort_values("area", ascending=False)
-            .geometry.iloc[0]
-        )
+    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    if lot_gdf is not None:
+        site_geom = lot_gdf.geometry.iloc[0]
+        center = site_geom.centroid
     else:
-        site_geom = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0].buffer(25)
+        site_building = ox.features_from_point(
+            (lat, lon),
+            dist=60,
+            tags={"building": True}
+        ).to_crs(3857)
 
-    center = site_geom.centroid
+        if len(site_building):
+            site_geom = (
+                site_building.assign(area=site_building.area)
+                .sort_values("area", ascending=False)
+                .geometry.iloc[0]
+            )
+        else:
+            site_geom = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0].buffer(25)
+
+        center = site_geom.centroid
     analysis_circle = center.buffer(MAP_RADIUS)
 
     # --------------------------------------------------------

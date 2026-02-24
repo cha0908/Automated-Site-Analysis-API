@@ -9,7 +9,7 @@ from shapely.geometry import Point, LineString, MultiLineString
 from io import BytesIO
 
 # ✅ IMPORT UNIVERSAL RESOLVER
-from modules.resolver import resolve_location
+from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -27,25 +27,30 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     # ✅ Dynamic resolver
     lon, lat = resolve_location(data_type, value)
 
-    site_point = gpd.GeoSeries(
-        [Point(lon, lat)],
-        crs=4326
-    ).to_crs(3857).iloc[0]
+    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    if lot_gdf is not None:
+        site_polygon = lot_gdf.geometry.iloc[0]
+        site_gdf = lot_gdf
+        centroid = site_polygon.centroid
+    else:
+        site_point = gpd.GeoSeries(
+            [Point(lon, lat)],
+            crs=4326
+        ).to_crs(3857).iloc[0]
 
-    # --------------------------------------------------------
-    # SITE POLYGON FROM PRELOADED ZONE DATA
-    # --------------------------------------------------------
+        # --------------------------------------------------------
+        # SITE POLYGON FROM PRELOADED ZONE DATA
+        # --------------------------------------------------------
 
-    ozp = ZONE_DATA.to_crs(3857)
+        ozp = ZONE_DATA.to_crs(3857)
+        matching = ozp[ozp.contains(site_point)]
 
-    matching = ozp[ozp.contains(site_point)]
+        if matching.empty:
+            raise ValueError("Site not within zoning dataset.")
 
-    if matching.empty:
-        raise ValueError("Site not within zoning dataset.")
-
-    site_polygon = matching.geometry.iloc[0]
-    site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
-    centroid = site_polygon.centroid
+        site_polygon = matching.geometry.iloc[0]
+        site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
+        centroid = site_polygon.centroid
 
     # --------------------------------------------------------
     # DRIVE NETWORK

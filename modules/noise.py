@@ -8,7 +8,7 @@ from shapely.geometry import Point, LineString
 from io import BytesIO
 
 # ✅ IMPORT UNIVERSAL RESOLVER
-from modules.resolver import resolve_location
+from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -51,31 +51,36 @@ def generate_noise(data_type: str, value: str):
     # ✅ Dynamic resolver
     lon, lat = resolve_location(data_type, value)
 
-    site_point = gpd.GeoSeries(
-        [Point(lon, lat)],
-        crs=4326
-    ).to_crs(3857).iloc[0]
-
     # --------------------------------------------------------
-    # SITE POLYGON
+    # SITE POLYGON (official lot boundary or OSM fallback)
     # --------------------------------------------------------
 
-    site_candidates = ox.features_from_point(
-        (lat, lon),
-        dist=60,
-        tags={"building": True}
-    ).to_crs(3857)
+    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    if lot_gdf is not None:
+        site_polygon = lot_gdf.geometry.iloc[0]
+        site_gdf = lot_gdf
+    else:
+        site_point = gpd.GeoSeries(
+            [Point(lon, lat)],
+            crs=4326
+        ).to_crs(3857).iloc[0]
 
-    site_candidates["area"] = site_candidates.area
+        site_candidates = ox.features_from_point(
+            (lat, lon),
+            dist=60,
+            tags={"building": True}
+        ).to_crs(3857)
 
-    if len(site_candidates) == 0:
-        raise ValueError("Site building footprint not found.")
+        site_candidates["area"] = site_candidates.area
 
-    site_polygon = site_candidates.sort_values(
-        "area", ascending=False
-    ).geometry.iloc[0]
+        if len(site_candidates) == 0:
+            raise ValueError("Site building footprint not found.")
 
-    site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
+        site_polygon = site_candidates.sort_values(
+            "area", ascending=False
+        ).geometry.iloc[0]
+
+        site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
 
     # --------------------------------------------------------
     # ROADS

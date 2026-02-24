@@ -11,7 +11,7 @@ from sklearn.cluster import KMeans
 from io import BytesIO
 
 # ✅ UNIVERSAL RESOLVER
-from modules.resolver import resolve_location
+from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -57,7 +57,13 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     lon, lat = resolve_location(data_type, value)
 
-    site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
+    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    if lot_gdf is not None:
+        site_geom = lot_gdf.geometry.iloc[0]
+        site_gdf = lot_gdf
+        site_point = site_geom.centroid
+    else:
+        site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
     # --------------------------------------------------------
     # ZONING
@@ -91,24 +97,25 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     buildings   = polygons[polygons.get("building").notnull()]
 
     # --------------------------------------------------------
-    # SITE FOOTPRINT
+    # SITE FOOTPRINT (only when not using official lot boundary)
     # --------------------------------------------------------
 
-    candidates = polygons[
-        polygons.geometry.geom_type.isin(["Polygon","MultiPolygon"]) &
-        (polygons.geometry.distance(site_point) < 40)
-    ]
+    if lot_gdf is None:
+        candidates = polygons[
+            polygons.geometry.geom_type.isin(["Polygon","MultiPolygon"]) &
+            (polygons.geometry.distance(site_point) < 40)
+        ]
 
-    if len(candidates):
-        site_geom = (
-            candidates.assign(area=candidates.area)
-            .sort_values("area", ascending=False)
-            .geometry.iloc[0]
-        )
-    else:
-        site_geom = site_point.buffer(40)
+        if len(candidates):
+            site_geom = (
+                candidates.assign(area=candidates.area)
+                .sort_values("area", ascending=False)
+                .geometry.iloc[0]
+            )
+        else:
+            site_geom = site_point.buffer(40)
 
-    site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
+        site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
     # MTR STATIONS
