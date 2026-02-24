@@ -240,6 +240,7 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
     ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
+    ax.set_aspect("equal")
 
     # ✅ UPDATED TITLE
     ax.set_title(

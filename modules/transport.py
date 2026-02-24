@@ -237,7 +237,7 @@ def generate_transport(data_type: str, value: str):
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-
+    ax.set_aspect("equal")
     # --------------------------------------------------------
     # LEGEND
     # --------------------------------------------------------

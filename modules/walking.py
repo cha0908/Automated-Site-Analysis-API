@@ -242,6 +242,7 @@ def generate_walking(data_type: str, value: str):
 
     ax.set_xlim(site_point.x - MAP_EXTENT, site_point.x + MAP_EXTENT)
     ax.set_ylim(site_point.y - MAP_EXTENT, site_point.y + MAP_EXTENT)
+    ax.set_aspect("equal")
 
     cx.add_basemap(
         ax,

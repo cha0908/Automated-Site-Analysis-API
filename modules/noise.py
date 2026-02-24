@@ -181,6 +181,7 @@ def generate_noise(data_type: str, value: str):
 
     ax.set_xlim(center.x - STUDY_RADIUS, center.x + STUDY_RADIUS)
     ax.set_ylim(center.y - STUDY_RADIUS, center.y + STUDY_RADIUS)
+    ax.set_aspect("equal")
 
     cx.add_basemap(
         ax,
