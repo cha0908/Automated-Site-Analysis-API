@@ -1,3 +1,4 @@
+import math
 import osmnx as ox
 import geopandas as gpd
 import contextily as cx
@@ -16,6 +17,7 @@ ox.settings.log_console = False
 
 DRIVE_SPEED = 35  # km/h
 MAP_EXTENT = 1400
+NEAREST_NAMED_STATION_M = 150  # fallback unnamed to this named station if within distance (m)
 
 
 # ------------------------------------------------------------
@@ -131,12 +133,22 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     fig.patch.set_facecolor("#f2f2f2")
     ax.set_facecolor("#f2f2f2")
 
+    ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
+    ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+
     cx.add_basemap(
         ax,
         source=cx.providers.CartoDB.PositronNoLabels,
         zoom=17,
         alpha=1.0
     )
+
+    ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
+    ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
 
     edges = ox.graph_to_gdfs(G, nodes=False).to_crs(3857)
     edges.plot(ax=ax, linewidth=0.6, color="#8f8f8f", alpha=0.35, zorder=1)
@@ -163,6 +175,13 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
             zorder=5
         )
 
+    # Build list of (centroid, name) for named stations (for unnamed fallback)
+    named_stations = []
+    for _, row in stations.iterrows():
+        raw = row.get("name:en") or row.get("name")
+        if raw is not None and not (isinstance(raw, float) and math.isnan(raw)) and isinstance(raw, str) and raw.strip():
+            named_stations.append((row.geometry.centroid, raw.strip()))
+
     # Routes
     for _, station in stations.iterrows():
 
@@ -181,31 +200,39 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
             egress.plot(ax=ax, linewidth=2.5, color="#27ae60", zorder=10)
             add_route_arrow(ax, egress, "#27ae60")
 
-        station_geom = station.geometry
-        if station_geom.geom_type == "Point":
-            station_geom = station_geom.buffer(60)
+        if st_centroid.distance(centroid) <= MAP_EXTENT:
+            station_geom = station.geometry
+            if station_geom.geom_type == "Point":
+                station_geom = station_geom.buffer(60)
 
-        gpd.GeoSeries([station_geom], crs=3857).plot(
-            ax=ax,
-            facecolor="#5dade2",
-            edgecolor="#2e86c1",
-            linewidth=1.5,
-            alpha=0.6,
-            zorder=7
-        )
+            gpd.GeoSeries([station_geom], crs=3857).plot(
+                ax=ax,
+                facecolor="#5dade2",
+                edgecolor="#2e86c1",
+                linewidth=1.5,
+                alpha=0.6,
+                zorder=7
+            )
 
-        name = station.get("name:en") or station.get("name") or "STATION"
-
-        ax.text(
-            st_centroid.x,
-            st_centroid.y + 120,
-            name.upper(),
-            fontsize=9,
-            weight="bold",
-            ha="center",
-            bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2),
-            zorder=8
-        )
+            raw = station.get("name:en") or station.get("name")
+            if raw is None or (isinstance(raw, float) and math.isnan(raw)) or not isinstance(raw, str):
+                name = "UNNAMED"
+            else:
+                name = (raw.strip() or "UNNAMED")
+            if name == "UNNAMED" and named_stations:
+                min_d = min((st_centroid.distance(c) for c, _ in named_stations), default=float("inf"))
+                if min_d <= NEAREST_NAMED_STATION_M:
+                    _, name = min(named_stations, key=lambda p: st_centroid.distance(p[0]))
+            ax.text(
+                st_centroid.x,
+                st_centroid.y + 120,
+                name.upper(),
+                fontsize=9,
+                weight="bold",
+                ha="center",
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.9, pad=2),
+                zorder=8
+            )
 
     # Site
     site_gdf.plot(
@@ -238,10 +265,6 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
         edgecolor="black"
     )
 
-    ax.set_xlim(centroid.x - MAP_EXTENT, centroid.x + MAP_EXTENT)
-    ax.set_ylim(centroid.y - MAP_EXTENT, centroid.y + MAP_EXTENT)
-    ax.set_aspect("equal")
-
     # ✅ UPDATED TITLE
     ax.set_title(
         f"SITE ANALYSIS - Driving Distance ({data_type} {value})",
@@ -253,6 +276,7 @@ def generate_driving(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     buffer = BytesIO()
     plt.tight_layout()
+    ax.set_position([0.02, 0.02, 0.96, 0.96])
     plt.savefig(buffer, format="png", dpi=200)
     plt.close(fig)
 

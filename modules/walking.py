@@ -98,14 +98,31 @@ def generate_walking(data_type: str, value: str):
     if stations.empty:
         raise ValueError("No nearby stations found.")
 
-    stations["station_name"] = stations.apply(
-        lambda r: r.get("name:en")
-        if isinstance(r.get("name:en"), str)
-        else r.get("name")
-        if isinstance(r.get("name"), str)
-        else "MTR Station",
-        axis=1
-    )
+    def _safe_station_name(r):
+        a, b = r.get("name:en"), r.get("name")
+        if isinstance(a, str) and a.strip():
+            return a.strip()
+        if isinstance(b, str) and b.strip():
+            return b.strip()
+        return "UNNAMED"
+
+    NEAREST_NAMED_STATION_M = 150  # fallback unnamed to this named station if within distance (m)
+
+    stations["station_name"] = stations.apply(_safe_station_name, axis=1)
+
+    # Replace UNNAMED with nearest named station's name if within threshold
+    unnamed_mask = stations["station_name"] == "UNNAMED"
+    if unnamed_mask.any():
+        named = stations[~unnamed_mask]
+        for idx in stations.index[unnamed_mask]:
+            cent = stations.at[idx, "geometry"].centroid
+            if named.empty:
+                break
+            named_copy = named.copy()
+            named_copy["_d"] = named_copy.geometry.centroid.distance(cent)
+            nearest = named_copy.loc[named_copy["_d"].idxmin()]
+            if nearest["_d"] <= NEAREST_NAMED_STATION_M:
+                stations.at[idx, "station_name"] = nearest["station_name"]
 
     stations["dist"] = stations.geometry.centroid.distance(site_point)
     stations = stations.sort_values("dist").head(3)
@@ -192,20 +209,6 @@ def generate_walking(data_type: str, value: str):
             zorder=5
         )
 
-        station_geom = r["station_polygon"]
-
-        if station_geom.geom_type == "Point":
-            station_geom = station_geom.buffer(60)
-
-        gpd.GeoSeries([station_geom], crs=3857).plot(
-            ax=ax,
-            facecolor=route_color,
-            edgecolor=route_color,
-            linewidth=1,
-            alpha=0.25,
-            zorder=4
-        )
-
         mid = r["route"].geometry.iloc[len(r["route"]) // 2].centroid
 
         ax.text(
@@ -219,15 +222,35 @@ def generate_walking(data_type: str, value: str):
             zorder=6
         )
 
-        ax.text(
-            r["station_centroid"].x,
-            r["station_centroid"].y + 120,
-            r["name"].upper(),
-            fontsize=10,
-            weight="bold",
-            ha="center",
-            zorder=7
-        )
+        if r["station_centroid"].distance(site_point) <= MAP_EXTENT:
+            station_geom = r["station_polygon"]
+
+            if station_geom.geom_type == "Point":
+                station_geom = station_geom.buffer(60)
+
+            gpd.GeoSeries([station_geom], crs=3857).plot(
+                ax=ax,
+                facecolor=route_color,
+                edgecolor=route_color,
+                linewidth=1,
+                alpha=0.25,
+                zorder=4
+            )
+
+            label_name = r["name"]
+            if not isinstance(label_name, str) or not str(label_name).strip():
+                label_name = "UNNAMED"
+            else:
+                label_name = str(label_name).strip()
+            ax.text(
+                r["station_centroid"].x,
+                r["station_centroid"].y + 120,
+                label_name.upper(),
+                fontsize=10,
+                weight="bold",
+                ha="center",
+                zorder=7
+            )
 
     site_gdf.plot(ax=ax, facecolor="red", edgecolor="none")
 

@@ -18,6 +18,7 @@ ox.settings.log_console = False
 
 FETCH_RADIUS = 1500
 MAP_HALF_SIZE = 900
+NEAREST_NAMED_STATION_M = 150  # fallback unnamed to this named station if within distance (m)
 MTR_COLOR = "#ffd166"
 
 
@@ -161,6 +162,11 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     fig, ax = plt.subplots(figsize=(12,12))
 
+    ax.set_xlim(site_point.x - MAP_HALF_SIZE, site_point.x + MAP_HALF_SIZE)
+    ax.set_ylim(site_point.y - MAP_HALF_SIZE, site_point.y + MAP_HALF_SIZE)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+
     cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=16, alpha=0.95)
 
     ax.set_xlim(site_point.x - MAP_HALF_SIZE, site_point.x + MAP_HALF_SIZE)
@@ -177,8 +183,9 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     if not bus_stops.empty:
         bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
 
-    if not stations.empty:
-        stations.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none", alpha=0.9, zorder=10)
+    stations_in_view = stations[stations["dist"] <= MAP_HALF_SIZE] if not stations.empty else stations
+    if not stations_in_view.empty:
+        stations_in_view.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none", alpha=0.9, zorder=10)
 
     site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred", linewidth=2, zorder=11)
 
@@ -222,12 +229,27 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     # MTR NAME LABELS
     # --------------------------------------------------------
 
-    if not stations.empty:
-        for _, st in stations.iterrows():
+    if not stations_in_view.empty:
+        named_stations = [
+            (row.geometry.centroid, str(row["name"]).strip())
+            for _, row in stations_in_view.iterrows()
+            if row["name"] is not None and isinstance(row["name"], str) and str(row["name"]).strip()
+        ]
+        for _, st in stations_in_view.iterrows():
+            raw_name = st["name"]
+            if raw_name is None or (isinstance(raw_name, float) and raw_name != raw_name) or not isinstance(raw_name, str) or not str(raw_name).strip():
+                label_name = "UNNAMED"
+                if named_stations:
+                    cent = st.geometry.centroid
+                    min_d = min((cent.distance(c) for c, _ in named_stations), default=float("inf"))
+                    if min_d <= NEAREST_NAMED_STATION_M:
+                        _, label_name = min(named_stations, key=lambda p: cent.distance(p[0]))
+            else:
+                label_name = str(raw_name).strip()
             ax.text(
                 st.centroid.x,
                 st.centroid.y + 120,
-                wrap_label(st["name"], 18),
+                wrap_label(label_name, 18),
                 fontsize=9,
                 ha="center",
                 va="center",
@@ -277,6 +299,8 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     )
 
     ax.set_axis_off()
+
+    ax.set_position([0.02, 0.02, 0.96, 0.96])
 
     buffer = BytesIO()
     plt.tight_layout()

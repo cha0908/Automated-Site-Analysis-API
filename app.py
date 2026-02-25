@@ -13,8 +13,9 @@ import hashlib
 from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import inch
+from reportlab.lib import utils
 from fastapi.middleware.cors import CORSMiddleware
-
+from concurrent.futures import ThreadPoolExecutor
 # -----------------------------------------------------
 # IMPORT MODULES
 # -----------------------------------------------------
@@ -246,30 +247,39 @@ def generate_pdf_report(data_type: str, value: str):
     # GENERATE ALL ANALYSIS IMAGES
     # --------------------------------------------------
 
-    walking_img = generate_walking(data_type, value)
-    driving_img = generate_driving(data_type, value, ZONE_DATA)
-    transport_img = generate_transport(data_type, value)
-    context_img = generate_context(data_type, value, ZONE_DATA)
-    view_img = generate_view(data_type, value, BUILDING_DATA)
-    noise_img = generate_noise(data_type, value)
-
-    images = [
-        walking_img,
-        driving_img,
-        transport_img,
-        context_img,
-        view_img,
-        noise_img
-    ]
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        f_walking = executor.submit(generate_walking, data_type, value)
+        f_driving = executor.submit(generate_driving, data_type, value, ZONE_DATA)
+        f_transport = executor.submit(generate_transport, data_type, value)
+        f_context = executor.submit(generate_context, data_type, value, ZONE_DATA)
+        f_view = executor.submit(generate_view, data_type, value, BUILDING_DATA)
+        f_noise = executor.submit(generate_noise, data_type, value)
+        images = [
+            f_walking.result(),
+            f_driving.result(),
+            f_transport.result(),
+            f_context.result(),
+            f_view.result(),
+            f_noise.result(),
+        ]
 
     # --------------------------------------------------
     # ADD TO PDF
     # --------------------------------------------------
 
+    max_w = 6 * inch
+    max_h = 5 * inch
+
     for img_buffer in images:
         img_buffer.seek(0)
-        elements.append(RLImage(img_buffer, width=6*inch, height=4.5*inch))
-        elements.append(Spacer(1, 0.6*inch))
+        reader = utils.ImageReader(img_buffer)
+        iw, ih = reader.getSize()  # size in points
+        scale = min(max_w / iw, max_h / ih, 1.0)
+        w = iw * scale
+        h = ih * scale
+        img_buffer.seek(0)
+        elements.append(RLImage(img_buffer, width=w, height=h))
+        elements.append(Spacer(1, 0.6 * inch))
 
     doc.build(elements)
 

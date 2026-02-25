@@ -155,18 +155,19 @@ def generate_transport(data_type: str, value: str):
                     new_point = Point(midpoint.x, midpoint.y + offset_y)
                     placed_positions.append(new_point)
 
-                    ax.text(
-                        new_point.x,
-                        new_point.y,
-                        clean_name.upper(),
-                        fontsize=9,
-                        weight="bold",
-                        color=COLOR_MTR,
-                        ha="center",
-                        va="center",
-                        zorder=10,
-                        bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=2)
-                    )
+                    if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
+                        ax.text(
+                            new_point.x,
+                            new_point.y,
+                            clean_name.upper(),
+                            fontsize=9,
+                            weight="bold",
+                            color=COLOR_MTR,
+                            ha="center",
+                            va="center",
+                            zorder=10,
+                            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=2)
+                        )
 
     # --------------------------------------------------------
     # LIGHT RAIL
@@ -184,14 +185,19 @@ def generate_transport(data_type: str, value: str):
         station_pts = stations.copy()
         station_pts["geometry"] = station_pts.centroid
 
-        station_pts.plot(
-            ax=ax,
-            facecolor="white",
-            edgecolor=COLOR_EXISTING_RAIL,
-            markersize=120,
-            linewidth=2,
-            zorder=6
-        )
+        station_pts = station_pts[
+            (station_pts["geometry"].x >= xmin) & (station_pts["geometry"].x <= xmax) &
+            (station_pts["geometry"].y >= ymin) & (station_pts["geometry"].y <= ymax)
+        ]
+        if not station_pts.empty:
+            station_pts.plot(
+                ax=ax,
+                facecolor="white",
+                edgecolor=COLOR_EXISTING_RAIL,
+                markersize=120,
+                linewidth=2,
+                zorder=6
+            )
 
     # --------------------------------------------------------
     # SITE
