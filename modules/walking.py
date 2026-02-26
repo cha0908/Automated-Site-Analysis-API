@@ -250,7 +250,7 @@ def generate_walking(data_type: str, value: str,
     buf = BytesIO()
     plt.tight_layout()
     # ↓ dpi=100 instead of 120 — saves ~30% image RAM
-    plt.savefig(buf, format="png", dpi=130)
+    plt.savefig(buf, format="png", dpi=100)
     plt.close(fig)
 
     gc.collect()   # final cleanup
