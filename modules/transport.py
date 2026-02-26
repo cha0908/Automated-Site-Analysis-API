@@ -347,8 +347,8 @@ def generate_driving(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight",
+    plt.savefig(buf, format="png", dpi=110, bbox_inches="tight",
                 facecolor="white")
     plt.close(fig)
     gc.collect()
-    return buffer
+    return buf
