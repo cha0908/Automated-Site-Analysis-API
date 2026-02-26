@@ -163,7 +163,7 @@ def generate_walking(data_type: str, value: str,
     stations["station_name"] = stations.apply(_name, axis=1)
     stations["dist"] = stations.geometry.centroid.distance(site_point)
     # ↓ Only top 2 stations — reduces route computations
-    stations = stations.sort_values("dist").head(2)
+    stations = stations.sort_values("dist").head(3)
 
     gc.collect()
 
@@ -250,7 +250,7 @@ def generate_walking(data_type: str, value: str,
     buf = BytesIO()
     plt.tight_layout()
     # ↓ dpi=100 instead of 120 — saves ~30% image RAM
-    plt.savefig(buf, format="png", dpi=100)
+    plt.savefig(buf, format="png", dpi=130)
     plt.close(fig)
 
     gc.collect()   # final cleanup
