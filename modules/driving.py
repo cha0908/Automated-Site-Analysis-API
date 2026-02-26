@@ -198,20 +198,43 @@ def generate_driving(data_type: str, value: str,
                     site_poly = matches.geometry.iloc[0]
             except Exception:
                 pass
-        # 2. OSM building fallback
+        # 2. OSM building footprint fallback
         if site_poly is None:
-            try:
-                osm = ox.features_from_point(
-                    (lat, lon), dist=60, tags={"building": True}
-                ).to_crs(3857)
-                if len(osm):
-                    osm["_a"] = osm.geometry.area
-                    site_poly = osm.sort_values("_a", ascending=False).geometry.iloc[0]
-            except Exception:
-                pass
-        # 3. Buffer fallback
+            for dist in [80, 150, 250]:   # expand search radius progressively
+                try:
+                    osm = ox.features_from_point(
+                        (lat, lon), dist=dist, tags={"building": True}
+                    ).to_crs(3857)
+                    if len(osm):
+                        osm["_a"] = osm.geometry.area
+                        candidate = osm.sort_values("_a", ascending=False).geometry.iloc[0]
+                        # Only use if centroid is close to our point
+                        if candidate.centroid.distance(site_pt_3857) < dist * 2:
+                            site_poly = candidate
+                            break
+                except Exception:
+                    pass
+
+        # 3. OSM landuse / amenity fallback
         if site_poly is None:
-            site_poly = site_pt_3857.buffer(50)
+            for tags in [{"landuse": True}, {"amenity": True}]:
+                try:
+                    osm = ox.features_from_point(
+                        (lat, lon), dist=100, tags=tags
+                    ).to_crs(3857)
+                    polys = osm[osm.geometry.geom_type.isin(["Polygon","MultiPolygon"])]
+                    if len(polys):
+                        polys = polys.copy()
+                        polys["_d"] = polys.geometry.centroid.distance(site_pt_3857)
+                        site_poly = polys.sort_values("_d").geometry.iloc[0]
+                        break
+                except Exception:
+                    pass
+
+        # 4. Guaranteed buffer fallback — always shows SOMETHING visible
+        if site_poly is None:
+            site_poly = site_pt_3857.buffer(80)   # 80m visible circle
+
         site_gdf = gpd.GeoDataFrame(geometry=[site_poly], crs=3857)
 
     centroid       = site_poly.centroid
