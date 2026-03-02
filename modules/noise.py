@@ -18,9 +18,9 @@ ox.settings.log_console = False
 # ------------------------------------------------------------
 
 STUDY_RADIUS = 150      # calculation radius (unchanged)
-PLOT_RADIUS = 70        # NEW: visual zoom radius
+PLOT_RADIUS = 139      # NEW: visual zoom radius
 GRID_RES = 6
-ZOOM = 20               # slightly increased for sharper zoom
+ZOOM = 19              # slightly increased for sharper zoom
 
 TRAFFIC_FLOW = 1200
 HEAVY_PERCENT = 0.12
