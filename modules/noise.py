@@ -12,7 +12,6 @@ import matplotlib.pyplot as plt
 from shapely.geometry import Point
 from io import BytesIO
 
-# IMPORT UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache   = True
@@ -22,7 +21,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 # ------------------------------------------------------------
-# SETTINGS — single fixed source matches Colab exactly
+# SETTINGS
 # ------------------------------------------------------------
 
 STUDY_RADIUS      = 150
@@ -51,11 +50,18 @@ def traffic_emission(flow, heavy_pct, speed):
 
 def generate_noise(data_type: str, value: str):
 
-    # Dynamic resolver
     lon, lat = resolve_location(data_type, value)
 
+    # ✅ KEY FIX — anchor point is always raw lon/lat, NOT lot polygon centroid
+    anchor_pt_3857 = gpd.GeoSeries(
+        [Point(lon, lat)], crs=4326
+    ).to_crs(3857).iloc[0]
+
+    cx_val = anchor_pt_3857.x
+    cy_val = anchor_pt_3857.y
+
     # --------------------------------------------------------
-    # SITE POLYGON
+    # SITE POLYGON — only for display, does NOT affect grid
     # --------------------------------------------------------
 
     lot_gdf = get_lot_boundary(lon, lat, data_type)
@@ -63,10 +69,6 @@ def generate_noise(data_type: str, value: str):
         site_polygon = lot_gdf.geometry.iloc[0]
         site_gdf     = lot_gdf
     else:
-        site_point = gpd.GeoSeries(
-            [Point(lon, lat)], crs=4326
-        ).to_crs(3857).iloc[0]
-
         try:
             site_candidates = ox.features_from_point(
                 (lat, lon), dist=60, tags={"building": True}
@@ -81,7 +83,7 @@ def generate_noise(data_type: str, value: str):
             ).geometry.iloc[0]
 
         except Exception:
-            site_polygon = site_point.buffer(40)
+            site_polygon = anchor_pt_3857.buffer(40)
 
         site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
 
@@ -101,18 +103,14 @@ def generate_noise(data_type: str, value: str):
         raise ValueError("No roads found in study radius.")
 
     # --------------------------------------------------------
-    # SOURCE LEVEL — single fixed value, same as Colab
+    # SOURCE LEVEL
     # --------------------------------------------------------
 
     L_source = traffic_emission(TRAFFIC_FLOW, HEAVY_PERCENT, SPEED)
 
     # --------------------------------------------------------
-    # GRID — anchored to centroid, matches map extent exactly
+    # GRID — anchored to raw lon/lat point, same as Colab
     # --------------------------------------------------------
-
-    center = site_polygon.centroid
-    cx_val = center.x
-    cy_val = center.y
 
     minx = cx_val - STUDY_RADIUS
     maxx = cx_val + STUDY_RADIUS
@@ -126,7 +124,7 @@ def generate_noise(data_type: str, value: str):
     noise_energy = np.zeros_like(X)
 
     # --------------------------------------------------------
-    # PROPAGATION — same as Colab, iterate geometry directly
+    # PROPAGATION — identical to Colab
     # --------------------------------------------------------
 
     for geom in roads.geometry:
@@ -193,7 +191,7 @@ def generate_noise(data_type: str, value: str):
     )
 
     # --------------------------------------------------------
-    # NOISE CONTOURS — zorder=2 so visible above basemap
+    # NOISE CONTOURS
     # --------------------------------------------------------
 
     levels = np.arange(45, 105, 5)
@@ -216,7 +214,7 @@ def generate_noise(data_type: str, value: str):
     )
 
     # --------------------------------------------------------
-    # BUILDINGS — façade color on top of contours
+    # BUILDINGS — façade color
     # --------------------------------------------------------
 
     if len(buildings) > 0 and "facade_db" in buildings.columns:
