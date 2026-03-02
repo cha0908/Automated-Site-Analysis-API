@@ -17,9 +17,10 @@ ox.settings.log_console = False
 # SETTINGS
 # ------------------------------------------------------------
 
-STUDY_RADIUS = 150
+STUDY_RADIUS = 150      # calculation radius (unchanged)
+PLOT_RADIUS = 70        # NEW: visual zoom radius
 GRID_RES = 6
-ZOOM = 19
+ZOOM = 20               # slightly increased for sharper zoom
 
 TRAFFIC_FLOW = 1200
 HEAVY_PERCENT = 0.12
@@ -179,8 +180,9 @@ def generate_noise(data_type: str, value: str):
 
     center = site_polygon.centroid
 
-    ax.set_xlim(center.x - STUDY_RADIUS, center.x + STUDY_RADIUS)
-    ax.set_ylim(center.y - STUDY_RADIUS, center.y + STUDY_RADIUS)
+    # UPDATED: use PLOT_RADIUS for visual zoom
+    ax.set_xlim(center.x - PLOT_RADIUS, center.x + PLOT_RADIUS)
+    ax.set_ylim(center.y - PLOT_RADIUS, center.y + PLOT_RADIUS)
 
     cx.add_basemap(
         ax,
@@ -238,7 +240,6 @@ def generate_noise(data_type: str, value: str):
     cbar = plt.colorbar(cont, ax=ax, fraction=0.03, pad=0.02)
     cbar.set_label("Noise Level Leq dB(A)")
 
-    # UPDATED TITLE
     ax.set_title(
         f"Near-Site Environmental Noise Assessment\n{data_type} {value}",
         fontsize=14,
