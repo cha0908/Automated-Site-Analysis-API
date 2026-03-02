@@ -35,18 +35,18 @@ GROUND_ABSORPTION = 0.6
 # ------------------------------------------------------------
 
 ROAD_TRAFFIC = {
-    "motorway":     {"flow": 3000, "heavy": 0.15, "speed": 80},
-    "trunk":        {"flow": 2000, "heavy": 0.12, "speed": 60},
-    "primary":      {"flow": 1200, "heavy": 0.10, "speed": 50},
-    "secondary":    {"flow": 800,  "heavy": 0.08, "speed": 40},
-    "tertiary":     {"flow": 400,  "heavy": 0.05, "speed": 30},
-    "residential":  {"flow": 150,  "heavy": 0.02, "speed": 20},
-    "unclassified": {"flow": 100,  "heavy": 0.02, "speed": 20},
-    "service":      {"flow": 80,   "heavy": 0.01, "speed": 15},
-    "living_street":{"flow": 50,   "heavy": 0.01, "speed": 10},
-    "footway":      {"flow": 0,    "heavy": 0.00, "speed": 0},
-    "path":         {"flow": 0,    "heavy": 0.00, "speed": 0},
-    "cycleway":     {"flow": 0,    "heavy": 0.00, "speed": 0},
+    "motorway":      {"flow": 3000, "heavy": 0.15, "speed": 80},
+    "trunk":         {"flow": 2000, "heavy": 0.12, "speed": 60},
+    "primary":       {"flow": 1200, "heavy": 0.10, "speed": 50},
+    "secondary":     {"flow": 800,  "heavy": 0.08, "speed": 40},
+    "tertiary":      {"flow": 400,  "heavy": 0.05, "speed": 30},
+    "residential":   {"flow": 150,  "heavy": 0.02, "speed": 20},
+    "unclassified":  {"flow": 100,  "heavy": 0.02, "speed": 20},
+    "service":       {"flow": 80,   "heavy": 0.01, "speed": 15},
+    "living_street": {"flow": 50,   "heavy": 0.01, "speed": 10},
+    "footway":       {"flow": 0,    "heavy": 0.00, "speed": 0},
+    "path":          {"flow": 0,    "heavy": 0.00, "speed": 0},
+    "cycleway":      {"flow": 0,    "heavy": 0.00, "speed": 0},
 }
 
 DEFAULT_TRAFFIC = {"flow": 300, "heavy": 0.04, "speed": 25}
@@ -58,7 +58,7 @@ DEFAULT_TRAFFIC = {"flow": 300, "heavy": 0.04, "speed": 25}
 
 def traffic_emission(flow, heavy_pct, speed):
     if flow <= 0:
-        return -999   # no traffic = no noise
+        return -999
     L_light = 27.7 + 10*np.log10(flow*(1 - heavy_pct) + 1e-9) + 0.02*speed
     L_heavy = 23.1 + 10*np.log10(flow*heavy_pct + 1e-9)        + 0.08*speed
     energy  = 10**(L_light/10) + 10**(L_heavy/10)
@@ -121,10 +121,18 @@ def generate_noise(data_type: str, value: str):
         raise ValueError("No roads found in study radius.")
 
     # --------------------------------------------------------
-    # GRID
+    # GRID — anchored to center for correct alignment
     # --------------------------------------------------------
 
-    minx, miny, maxx, maxy = site_polygon.buffer(STUDY_RADIUS).bounds
+    center       = site_polygon.centroid
+    cx_val       = center.x
+    cy_val       = center.y
+
+    # Grid covers exactly the visible map area
+    minx = cx_val - STUDY_RADIUS
+    maxx = cx_val + STUDY_RADIUS
+    miny = cy_val - STUDY_RADIUS
+    maxy = cy_val + STUDY_RADIUS
 
     x_vals = np.arange(minx, maxx, GRID_RES)
     y_vals = np.arange(miny, maxy, GRID_RES)
@@ -139,8 +147,6 @@ def generate_noise(data_type: str, value: str):
     for _, road_row in roads.iterrows():
 
         highway_val = road_row.get("highway", None)
-
-        # OSM highway can be a list — take first value
         if isinstance(highway_val, list):
             highway_val = highway_val[0]
 
@@ -148,7 +154,7 @@ def generate_noise(data_type: str, value: str):
         L_source = traffic_emission(cfg["flow"], cfg["heavy"], cfg["speed"])
 
         if L_source == -999:
-            continue   # skip footways, paths etc.
+            continue
 
         geom  = road_row.geometry
         lines = geom.geoms if geom.geom_type == "MultiLineString" else [geom]
@@ -179,10 +185,10 @@ def generate_noise(data_type: str, value: str):
 
         facade_levels = []
         for geom in buildings.geometry:
-            centroid = geom.centroid
-            mask     = (np.abs(X - centroid.x) < GRID_RES) & \
-                       (np.abs(Y - centroid.y) < GRID_RES)
-            val      = float(np.mean(noise[mask])) if mask.any() else float(np.nan)
+            bcentroid = geom.centroid
+            mask      = (np.abs(X - bcentroid.x) < GRID_RES*2) & \
+                        (np.abs(Y - bcentroid.y) < GRID_RES*2)
+            val       = float(np.mean(noise[mask])) if mask.any() else float(np.nan)
             facade_levels.append(val)
 
         buildings["facade_db"] = facade_levels
@@ -200,54 +206,64 @@ def generate_noise(data_type: str, value: str):
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    center = site_polygon.centroid
-    ax.set_xlim(center.x - STUDY_RADIUS, center.x + STUDY_RADIUS)
-    ax.set_ylim(center.y - STUDY_RADIUS, center.y + STUDY_RADIUS)
+    ax.set_xlim(cx_val - STUDY_RADIUS, cx_val + STUDY_RADIUS)
+    ax.set_ylim(cy_val - STUDY_RADIUS, cy_val + STUDY_RADIUS)
     ax.set_aspect("equal")
 
-    # 2D flat map
+    # FIX 1 — No labels basemap
     cx.add_basemap(
         ax,
-        source=cx.providers.CartoDB.Positron,
+        source=cx.providers.CartoDB.PositronNoLabels,
         crs=3857,
         zoom=ZOOM,
         alpha=1.0
     )
 
     # --------------------------------------------------------
-    # NOISE CONTOURS
+    # FIX 2 — Noise contours FIRST (before buildings)
+    # so contourf fills the whole map area correctly
     # --------------------------------------------------------
 
     levels = np.arange(45, 105, 5)
 
+    # Filled contours — drawn over basemap
     cont = ax.contourf(
         X, Y, noise,
         levels=levels,
         cmap="RdYlGn_r",
-        alpha=0.45
+        alpha=0.50,
+        zorder=2        # ← above basemap
     )
 
+    # Contour lines
     ax.contour(
         X, Y, noise,
         levels=levels,
         colors="black",
         linewidths=0.4,
-        alpha=0.3
+        alpha=0.35,
+        zorder=3
     )
 
     # --------------------------------------------------------
-    # BUILDINGS — façade color
+    # BUILDINGS — façade color (drawn on top of contours)
     # --------------------------------------------------------
 
     if len(buildings) > 0 and "facade_db" in buildings.columns:
-        buildings.plot(
-            ax=ax,
-            column="facade_db",
-            cmap="RdYlGn_r",
-            linewidth=0.8,
-            edgecolor="#555555",
-            alpha=0.85
-        )
+        # Drop NaN rows so colormap works correctly
+        bplot = buildings.dropna(subset=["facade_db"])
+        if len(bplot) > 0:
+            bplot.plot(
+                ax=ax,
+                column="facade_db",
+                cmap="RdYlGn_r",
+                vmin=45,
+                vmax=100,
+                linewidth=0.8,
+                edgecolor="#333333",
+                alpha=0.90,
+                zorder=4
+            )
 
     # --------------------------------------------------------
     # SITE
@@ -256,17 +272,19 @@ def generate_noise(data_type: str, value: str):
     site_gdf.plot(
         ax=ax,
         facecolor="red",
-        edgecolor="none",
+        edgecolor="white",
+        linewidth=1.5,
         zorder=10
     )
 
     ax.text(
-        center.x, center.y,
+        cx_val, cy_val,
         "SITE",
-        fontsize=14, weight="bold",
+        fontsize=12, weight="bold",
         color="white",
         ha="center", va="center",
-        zorder=20
+        zorder=20,
+        bbox=dict(facecolor="red", edgecolor="none", pad=2)
     )
 
     # --------------------------------------------------------
@@ -275,6 +293,7 @@ def generate_noise(data_type: str, value: str):
 
     cbar = plt.colorbar(cont, ax=ax, fraction=0.03, pad=0.02)
     cbar.set_label("Noise Level Leq dB(A)", fontsize=11)
+    cbar.ax.tick_params(labelsize=9)
 
     # --------------------------------------------------------
     # NORTH ARROW
@@ -293,27 +312,28 @@ def generate_noise(data_type: str, value: str):
         zorder=25
     )
     ax.text(
-        nx, ny + L_ar * 1.4, "N",
+        nx, ny + L_ar * 1.6, "N",
         fontsize=12, weight="bold",
         ha="center", va="center", zorder=25
     )
 
     # --------------------------------------------------------
-    # TITLE
+    # FIX 3 — Correct title format
     # --------------------------------------------------------
 
     ax.set_title(
         f"Near-Site Environmental Noise Assessment\n"
         f"{data_type} {value}\n"
         f"Traffic + Ground Absorption + Reflection Effects",
-        fontsize=14, weight="bold"
+        fontsize=13, weight="bold"
     )
 
     ax.set_axis_off()
 
     buffer = BytesIO()
     plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=200, bbox_inches="tight",
+                facecolor="white")
     plt.close(fig)
     gc.collect()
 
