@@ -24,7 +24,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 # SETTINGS
 # ------------------------------------------------------------
 
-STUDY_RADIUS      = 350
+STUDY_RADIUS      = 400
 GRID_RES          = 6
 ZOOM              = 19
 GROUND_ABSORPTION = 0.6
