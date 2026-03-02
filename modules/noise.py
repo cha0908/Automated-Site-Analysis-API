@@ -52,7 +52,7 @@ def generate_noise(data_type: str, value: str):
 
     lon, lat = resolve_location(data_type, value)
 
-    # ✅ KEY FIX — anchor point is always raw lon/lat, NOT lot polygon centroid
+    # Anchor point is always raw lon/lat, NOT lot polygon centroid
     anchor_pt_3857 = gpd.GeoSeries(
         [Point(lon, lat)], crs=4326
     ).to_crs(3857).iloc[0]
@@ -109,7 +109,7 @@ def generate_noise(data_type: str, value: str):
     L_source = traffic_emission(TRAFFIC_FLOW, HEAVY_PERCENT, SPEED)
 
     # --------------------------------------------------------
-    # GRID — anchored to raw lon/lat point, same as Colab
+    # GRID — anchored to raw lon/lat point
     # --------------------------------------------------------
 
     minx = cx_val - STUDY_RADIUS
@@ -124,7 +124,7 @@ def generate_noise(data_type: str, value: str):
     noise_energy = np.zeros_like(X)
 
     # --------------------------------------------------------
-    # PROPAGATION — identical to Colab
+    # PROPAGATION
     # --------------------------------------------------------
 
     for geom in roads.geometry:
@@ -181,7 +181,7 @@ def generate_noise(data_type: str, value: str):
     ax.set_ylim(cy_val - STUDY_RADIUS, cy_val + STUDY_RADIUS)
     ax.set_aspect("equal")
 
-    # ✅ No labels 2D flat basemap
+    # No labels 2D flat basemap
     cx.add_basemap(
         ax,
         source=cx.providers.CartoDB.PositronNoLabels,
@@ -218,19 +218,17 @@ def generate_noise(data_type: str, value: str):
     # --------------------------------------------------------
 
     if len(buildings) > 0 and "facade_db" in buildings.columns:
-        bplot = buildings.dropna(subset=["facade_db"])
-        if len(bplot) > 0:
-            bplot.plot(
-                ax=ax,
-                column="facade_db",
-                cmap="RdYlGn_r",
-                vmin=45,
-                vmax=100,
-                linewidth=0.8,
-                edgecolor="#555555",
-                alpha=0.85,
-                zorder=4
-            )
+        buildings.plot(
+            ax=ax,
+            column="facade_db",
+            cmap="RdYlGn_r",
+            vmin=45,
+            vmax=100,
+            linewidth=0.8,
+            edgecolor="#555555",
+            alpha=0.85,
+            zorder=4
+        )
 
     # --------------------------------------------------------
     # SITE
@@ -243,8 +241,10 @@ def generate_noise(data_type: str, value: str):
         zorder=10
     )
 
+    # FIX: use site polygon centroid for SITE label, not anchor point
+    site_center = site_gdf.geometry.iloc[0].centroid
     ax.text(
-        cx_val, cy_val,
+        site_center.x, site_center.y,
         "SITE",
         fontsize=14, weight="bold",
         color="white",
