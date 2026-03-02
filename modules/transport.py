@@ -1,7 +1,13 @@
+import matplotlib
+matplotlib.use("Agg")
+
+import os
+import gc
 import osmnx as ox
 import geopandas as gpd
 import contextily as cx
 import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
 import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import matplotlib.legend_handler as lh
@@ -15,18 +21,20 @@ from PIL import Image
 # IMPORT UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
-ox.settings.use_cache = True
+ox.settings.use_cache   = True
 ox.settings.log_console = False
 
-MAP_RADIUS       = 3000
-COLOR_ROADS      = "#e85d9e"
-COLOR_WATER      = "#6fa8dc"
-COLOR_BUILDINGS  = "#d6d6d6"
-COLOR_SITE       = "#FF0000"
-COLOR_LIGHT_RAIL = "#D3A809"
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-STATION_MIN_DISTANCE = 250   # metres — prevents logo overlap
-STATION_LOGO_ZOOM    = 0.055  # adjust to resize logos on map
+MAP_RADIUS           = 3000
+COLOR_ROADS          = "#e85d9e"
+COLOR_WATER          = "#6fa8dc"
+COLOR_BUILDINGS      = "#d6d6d6"
+COLOR_SITE           = "#FF0000"
+COLOR_LIGHT_RAIL     = "#D3A809"
+STATION_MIN_DISTANCE = 250       # metres — prevents logo overlap
+STATION_LOGO_ZOOM    = 0.055     # adjust to resize logos on map
 
 
 # ============================================================
@@ -73,20 +81,20 @@ def get_mtr_color(name: str) -> str:
 
 
 # ============================================================
-# LOAD MTR LOGO  (module-level, loaded once)
+# LOAD MTR LOGO — same pattern as driving.py
 # ============================================================
 
-MTR_LOGO_PATH = "HK_MTR_logo.png"   # ← path relative to where app runs
+_STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
+_MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
 
 try:
-    _mtr_logo_img    = Image.open(MTR_LOGO_PATH).convert("RGBA")
-    _mtr_logo_array  = np.array(_mtr_logo_img)
-    MTR_LOGO_LOADED  = True
-    print(f" MTR logo loaded: {MTR_LOGO_PATH}")
+    _mtr_img        = mpimg.imread(_MTR_LOGO_PATH)
+    MTR_LOGO_LOADED = True
+    print(f"MTR logo loaded: {_MTR_LOGO_PATH}")
 except Exception as e:
-    MTR_LOGO_LOADED  = False
-    _mtr_logo_array  = None
-    print(f" MTR logo not found ({e}). Using drawn roundel fallback.")
+    _mtr_img        = None
+    MTR_LOGO_LOADED = False
+    print(f"MTR logo not found ({e}). Using drawn roundel fallback.")
 
 
 # ============================================================
@@ -97,27 +105,30 @@ def _draw_roundel_fallback(ax, x, y, size=60, color="#ED1D24", zorder=9):
     ax.add_patch(plt.Circle((x, y), size, color=color, zorder=zorder))
     bar_w = size * 2.0
     bar_h = size * 0.55
-    ax.add_patch(plt.Rectangle((x - bar_w/2, y - bar_h/2), bar_w, bar_h,
-                                color="white", zorder=zorder + 1))
-    ax.add_patch(plt.Circle((x, y), size * 0.55, color="white", zorder=zorder + 2))
-    ax.add_patch(plt.Rectangle((x - bar_w/2, y - bar_h/2), bar_w, bar_h,
-                                color=color, zorder=zorder + 3))
+    ax.add_patch(plt.Rectangle(
+        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
+        color="white", zorder=zorder + 1))
+    ax.add_patch(plt.Circle((x, y), size * 0.55,
+                             color="white", zorder=zorder + 2))
+    ax.add_patch(plt.Rectangle(
+        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
+        color=color, zorder=zorder + 3))
 
 
 # ============================================================
-# DRAW STATION
+# DRAW STATION — same pattern as driving.py _add_mtr_icon
 # ============================================================
 
 def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
                   fallback_color="#ED1D24", zorder=9):
-    if MTR_LOGO_LOADED:
-        imagebox = OffsetImage(_mtr_logo_array, zoom=zoom)
-        imagebox.image.axes = ax
+    if MTR_LOGO_LOADED and _mtr_img is not None:
+        icon = OffsetImage(_mtr_img, zoom=zoom)
+        icon.image.axes = ax
         ab = AnnotationBbox(
-            imagebox, (x, y),
-            xycoords='data',
+            icon, (x, y),
             frameon=False,
-            zorder=zorder
+            zorder=zorder,
+            box_alignment=(0.5, 0.5)
         )
         ax.add_artist(ab)
     else:
@@ -173,8 +184,10 @@ def generate_transport(data_type: str, value: str):
     water      = safe_fetch({"natural": "water"})
     mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
 
+    gc.collect()
+
     # --------------------------------------------------------
-    # SITE POLYGON (only when not using official lot boundary)
+    # SITE POLYGON
     # --------------------------------------------------------
 
     if lot_gdf is None:
@@ -275,7 +288,8 @@ def generate_transport(data_type: str, value: str):
                             color=line_color,
                             ha="center", va="center",
                             zorder=12,
-                            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=2)
+                            bbox=dict(facecolor="white", edgecolor="none",
+                                      alpha=0.85, pad=2)
                         )
 
                 # Unnamed routes fallback
@@ -313,8 +327,8 @@ def generate_transport(data_type: str, value: str):
         placed_station_positions = []
 
         for _, row in station_pts.iterrows():
-            sx, sy      = row.geometry.x, row.geometry.y
-            current_pt  = Point(sx, sy)
+            sx, sy     = row.geometry.x, row.geometry.y
+            current_pt = Point(sx, sy)
 
             # Skip if too close to an already-placed station
             too_close = any(
@@ -415,9 +429,13 @@ def generate_transport(data_type: str, value: str):
     )
 
     # MTR Station — logo thumbnail or fallback circle
-    if MTR_LOGO_LOADED:
-        thumb     = Image.fromarray(_mtr_logo_array).resize((20, 20), Image.LANCZOS)
-        thumb_arr = np.array(thumb)
+    if MTR_LOGO_LOADED and _mtr_img is not None:
+        # Use PIL to resize for legend thumbnail
+        pil_thumb = Image.fromarray(
+            ((_mtr_img * 255).astype(np.uint8)
+             if _mtr_img.dtype != np.uint8 else _mtr_img)
+        ).resize((20, 20), Image.LANCZOS)
+        thumb_arr = np.array(pil_thumb)
 
         class LogoHandler(mlines.Line2D):
             pass
@@ -453,7 +471,7 @@ def generate_transport(data_type: str, value: str):
 
     legend = ax.legend(
         handles=legend_handles,
-        handler_map=handler_map if MTR_LOGO_LOADED else None,
+        handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
         loc="lower left",
         bbox_to_anchor=(0.02, 0.15),
         frameon=True,
@@ -484,5 +502,6 @@ def generate_transport(data_type: str, value: str):
     plt.tight_layout()
     plt.savefig(buffer, format="png", dpi=200)
     plt.close(fig)
+    gc.collect()
 
     return buffer
