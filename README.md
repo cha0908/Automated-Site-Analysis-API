@@ -495,7 +495,7 @@ fetch_analysis("report", "IL 1657", "report.pdf")
 
 ## Deployment
 
-### Render (Cloud — Recommended)
+### Render (Cloud)
 
 The project is pre-configured for [Render](https://render.com) via `render.yaml`.
 
@@ -541,7 +541,7 @@ uvicorn app:app --host 0.0.0.0 --port 10000
 
 ---
 
-### Docker (Optional)
+### Docker (Future)
 
 ```dockerfile
 FROM python:3.11-slim
