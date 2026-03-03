@@ -94,7 +94,7 @@ The system is designed as a modular, extensible, near-field screening model suit
 │                                                       │
 │  Grid energy accumulation (NumPy vectorised)          │
 │  ── Geometric spreading    20·log₁₀(d+1)              │
-│  ── Ground absorption      G × coeff × log₁₀(d+1)    │
+│  ── Ground absorption      G × coeff × log₁₀(d+1)     │
 │  ── Base reflection        + base_reflection dB       │
 │                                                       │
 │  Post-processing pipeline (ordered):                  │
