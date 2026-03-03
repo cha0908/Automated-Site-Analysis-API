@@ -1,5 +1,4 @@
-# Automated Site Context Analysis Engine
-## Technical Architecture & System Design Documentation
+# Technical Architecture & System Design Documentation
 
 > **Module:** `generate_context()`
 > **Output:** PNG map (120 dpi) via `BytesIO` buffer
