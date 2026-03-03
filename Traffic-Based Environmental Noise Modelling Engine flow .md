@@ -349,6 +349,5 @@ It forms a modular, extensible, near-field traffic noise modelling framework sui
 
 ---
 
-Model Version: 1.0  
+Model Version: 1.1  
 Type: Near-field screening acoustic model  
-Author: [Your Name]  
