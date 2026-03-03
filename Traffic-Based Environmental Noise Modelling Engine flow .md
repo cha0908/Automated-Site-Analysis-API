@@ -64,10 +64,10 @@ The system is designed as a modular, extensible, near-field screening model suit
 ┌───────────────────────────────────────────────────────┐
 │             Spatial Data Acquisition                  │
 │                                                       │
-│  ┌─────────────────┐  ┌────────────┐  ┌───────────┐  │
-│  │  OSM Road Net   │  │ ATC Station│  │ LNRS WFS  │  │
-│  │  (osmnx)        │  │ WFS / File │  │ / Fallback│  │
-│  └────────┬────────┘  └─────┬──────┘  └─────┬─────┘  │
+│  ┌─────────────────┐  ┌────────────┐  ┌───────────┐   │
+│  │  OSM Road Net   │  │ ATC Station│  │ LNRS WFS  │   │
+│  │  (osmnx)        │  │ WFS / File │  │ / Fallback│   │
+│  └────────┬────────┘  └─────┬──────┘  └─────┬─────┘   │
 └───────────┼─────────────────┼───────────────┼─────────┘
             │                 │               │
             ▼                 ▼               ▼
@@ -75,7 +75,7 @@ The system is designed as a modular, extensible, near-field screening model suit
 │            Traffic & Correction Assignment            │
 │                                                       │
 │  TrafficAssigner → CanyonAssigner → LNRSAssigner      │
-│  (ATC snap+fallback) (bldg corridor)  (-3 dB LNRS)   │
+│  (ATC snap+fallback) (bldg corridor)  (-3 dB LNRS)    │
 └───────────────────────┬───────────────────────────────┘
                         │
                         ▼
@@ -107,7 +107,7 @@ The system is designed as a modular, extensible, near-field screening model suit
 ┌───────────────────────────────────────────────────────┐
 │             Visualisation & Export                    │
 │                                                       │
-│  Noise contourf   (RdYlGn_r, 50–70 dB)    [FIX S]    │
+│  Noise contourf   (RdYlGn_r, 50–70 dB)    [FIX S]     │
 │  Contour labels   (every 10 dB)                       │
 │  Building façades (coloured by exposure)              │
 │  EPD thresholds   (floating legend box)    [FIX T]    │
