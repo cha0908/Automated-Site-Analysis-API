@@ -71,7 +71,7 @@ This module generates a **site driving distance analysis map** for any Hong Kong
 ┌───────────────────────────────────────────────────────┐
 │              Site Polygon Detection                   │
 │                                                       │
-│   Priority 1 : Official lot boundary (get_lot_boundary)│
+│   Priority 1 : Official lot boundary get_lot_boundary │
 │   Priority 2 : OZP zone_data polygon (if provided)    │
 │   Priority 3 : OSM building footprint (80→150→250 m)  │
 │   Priority 4 : OSM landuse / amenity polygon          │
