@@ -806,20 +806,20 @@ class NoiseVisualizer:
 # PUBLIC API ENTRY POINT
 # ============================================================
 
-def generate_noise(data_type: str, value: str) -> BytesIO:
+def generate_noise(data_type: str, value: str,
+                   lon: float = None, lat: float = None,
+                   lot_ids: list = None, extents: list = None) -> BytesIO:
     cfg = CFG.copy()
 
-    lon, lat = resolve_location(data_type, value)
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
-    # Site polygon — three-tier fallback:
-    #   1. get_lot_boundary() if it returns a valid Polygon (not a Point)
-    #   2. Largest OSM building within 80m (same as Colab — gives correct footprint)
-    #   3. 40m circular buffer around resolved coordinate
+
+
     site_polygon = None
     site_gdf     = None
     pt = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     if lot_gdf is not None:
         geom = lot_gdf.geometry.iloc[0]
         if geom is not None and geom.geom_type in ("Polygon", "MultiPolygon") and geom.area > 100:
