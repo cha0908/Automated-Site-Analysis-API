@@ -16,8 +16,8 @@ from modules.resolver import resolve_location, get_lot_boundary
 ox.settings.use_cache = True
 ox.settings.log_console = False
 
-FETCH_RADIUS = 1500
-MAP_HALF_SIZE = 900
+FETCH_RADIUS = 800
+MAP_HALF_SIZE = 600
 NEAREST_NAMED_STATION_M = 150  # fallback unnamed to this named station if within distance (m)
 MTR_COLOR = "#ffd166"
 
@@ -123,7 +123,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     stations = ox.features_from_point(
-        (lat, lon), tags={"railway":"station"}, dist=2000
+        (lat, lon), tags={"railway":"station"}, dist=1200
     ).to_crs(3857)
 
     if not stations.empty:
@@ -137,7 +137,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     bus_stops = ox.features_from_point(
-        (lat, lon), tags={"highway":"bus_stop"}, dist=900
+        (lat, lon), tags={"highway":"bus_stop"}, dist=700
     ).to_crs(3857)
 
     if len(bus_stops) > 6:
@@ -150,7 +150,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     # --------------------------------------------------------
 
     labels = ox.features_from_point(
-        (lat, lon), dist=800, tags=LABEL_RULES
+        (lat, lon), dist=600, tags=LABEL_RULES
     ).to_crs(3857)
 
     labels["label"] = labels.get("name:en").fillna(labels.get("name"))

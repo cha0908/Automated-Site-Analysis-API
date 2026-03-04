@@ -1,6 +1,5 @@
 import matplotlib
 matplotlib.use("Agg")
-
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -99,7 +98,10 @@ print("Startup complete.")
 class LocationRequest(BaseModel):
     data_type: str
     value: str
-
+class WalkingRequest(BaseModel):
+    data_type: str
+    value: str
+    max_walk_minutes: Optional[int] = None l
 def image_response(buffer: BytesIO):
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="image/png")

@@ -241,7 +241,7 @@ def generate_walking(data_type: str, value: str,
 
     # ↓ alpha=0.35 reduces tile download size slightly
     cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
-                   zoom=zoom_level, alpha=0.35)
+                   zoom=zoom_level, alpha=1)
 
     ax.set_title(f"Walking Accessibility ({max_walk_minutes} min)"
                  f" - {data_type} {value}",
