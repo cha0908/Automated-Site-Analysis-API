@@ -45,7 +45,7 @@ RING_CONFIGS = {
         "rings":      [(375,  "1.5 MINS\n0.375 KM"),
                        (750,  "3 MINS\n0.75 KM"),
                        (1125, "4.5 MINS\n1.125 KM")],
-        "max_radius": 1125, "map_extent": 1400, "graph_dist": 2500,
+        "max_radius": 1300, "map_extent": 1400, "graph_dist": 2500,
     },
 }
 
@@ -70,41 +70,104 @@ def _add_mtr_icon(ax, x, y, size=0.035, zorder=15):
 
 
 # ── Arrow: one clean annotate arrow per route ─────────────────
-def _add_route_arrow(ax, gdf_route, color, zorder=20):
+def _add_route_arrow(ax, gdf_route, color, position=1.0, zorder=20):
     """
-    Single directional arrow placed at 60% along the longest
-    segment of the route using ax.annotate (clean, no clutter).
+    Draw a single directional arrow along the full route geometry.
+
+    The arrow is placed at a distance `position` * total_length
+    along the route, where `position` is in [0, 1].
     """
     if gdf_route is None or gdf_route.empty:
         return
 
-    # Find longest segment
-    best_len, best_seg = -1, None
+    # Flatten all line geometries into one ordered coordinate list
+    coords: list[tuple[float, float]] = []
     for geom in gdf_route.geometry:
         parts = list(geom.geoms) if isinstance(geom, MultiLineString) else [geom]
         for p in parts:
-            if isinstance(p, LineString) and p.length > best_len:
-                best_len = p.length
-                best_seg = p
+            if isinstance(p, LineString):
+                pts = list(p.coords)
+                if not coords:
+                    coords.extend(pts)
+                else:
+                    # Avoid duplicating the connecting point
+                    if pts and pts[0] == coords[-1]:
+                        coords.extend(pts[1:])
+                    else:
+                        coords.extend(pts)
 
-    if best_seg is None:
-        return
-
-    coords = list(best_seg.coords)
     if len(coords) < 2:
         return
 
-    # Point at 60% along this segment
-    idx = max(0, min(int(len(coords) * 0.6), len(coords) - 2))
+    # Compute segment lengths and total length
+    seg_lengths = []
+    for (x0, y0), (x1, y1) in zip(coords[:-1], coords[1:]):
+        seg_lengths.append(math.hypot(x1 - x0, y1 - y0))
+
+    total_length = sum(seg_lengths)
+    if total_length == 0:
+        return
+
+    # Clamp position into [0, 1]
+    pos = max(0.0, min(1.0, float(position)))
+    target_dist = pos * total_length
+
+    # Special cases: exactly at start or end of the route
+    if pos <= 0.0:
+        (x0, y0) = coords[0]
+        (x1, y1) = coords[1]
+        head_x, head_y = x0, y0
+        # Tail a bit forward along first segment
+        back_t = 0.15
+        tail_x = x0 + back_t * (x1 - x0)
+        tail_y = y0 + back_t * (y1 - y0)
+    elif pos >= 1.0:
+        (x0, y0) = coords[-2]
+        (x1, y1) = coords[-1]
+        head_x, head_y = x1, y1
+        # Tail a bit back along last segment
+        back_t = 0.15
+        tail_x = x1 - back_t * (x1 - x0)
+        tail_y = y1 - back_t * (y1 - y0)
+    else:
+        # Find the segment where target_dist falls
+        dist_so_far = 0.0
+        seg_index = 0
+        for i, seg_len in enumerate(seg_lengths):
+            if dist_so_far + seg_len >= target_dist:
+                seg_index = i
+                break
+            dist_so_far += seg_len
+
+        (x0, y0) = coords[seg_index]
+        (x1, y1) = coords[seg_index + 1]
+        seg_len = seg_lengths[seg_index]
+        if seg_len == 0:
+            return
+
+        # Local fraction along this segment
+        local_t = (target_dist - dist_so_far) / seg_len
+        # Arrow head at this point
+        head_x = x0 + local_t * (x1 - x0)
+        head_y = y0 + local_t * (y1 - y0)
+
+        # Tail slightly before the head along the same segment
+        back_t = max(0.0, local_t - 0.15)
+        tail_x = x0 + back_t * (x1 - x0)
+        tail_y = y0 + back_t * (y1 - y0)
+
+    if head_x == tail_x and head_y == tail_y:
+        return
+
     ax.annotate(
         "",
-        xy=coords[idx + 1],
-        xytext=coords[idx],
+        xy=(head_x, head_y),
+        xytext=(tail_x, tail_y),
         arrowprops=dict(
             arrowstyle="-|>",
             color=color,
-            lw=2.5,
-            mutation_scale=20,
+            lw=3,
+            mutation_scale=26,
         ),
         zorder=zorder,
     )
@@ -255,7 +318,9 @@ def generate_driving(data_type: str, value: str,
         dist=max(cfg["max_radius"] * 2, 1500)
     ).to_crs(3857)
     stations["dist"] = stations.centroid.distance(centroid)
-    stations = stations.sort_values("dist").head(3)
+    # Keep up to 3 nearest stations, but only within the largest ring radius
+    stations = stations.sort_values("dist")
+    stations = stations[stations["dist"] <= cfg["max_radius"]].head(3)
 
     def _route(nf, nt):
         try:
@@ -267,7 +332,7 @@ def generate_driving(data_type: str, value: str,
     gc.collect()
 
     # ── Figure ────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(11, 11))
+    fig, ax = plt.subplots(figsize=(12, 12))
     zoom = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)
 
     cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
@@ -300,15 +365,34 @@ def generate_driving(data_type: str, value: str,
         egress_gdf  = _route(site_node, st_node)
         ingress_gdf = _route(st_node,   site_node)
 
-        if egress_gdf is not None:
-            egress_gdf.plot(ax=ax, linewidth=3.5, color=EGRESS_COLOR,
-                            alpha=0.92, zorder=8)
-            _add_route_arrow(ax, egress_gdf, EGRESS_COLOR, zorder=20)
+        # If ingress and egress share the same geometry, draw one centreline
+        # but keep both directional arrows so overlap is still clear.
+        overlap = False
+        if egress_gdf is not None and ingress_gdf is not None:
+            if len(egress_gdf) == len(ingress_gdf):
+                overlap = all(
+                    e.equals(i) for e, i in zip(egress_gdf.geometry, ingress_gdf.geometry)
+                )
 
-        if ingress_gdf is not None:
+        if overlap:
+            # Single centreline (use ingress style), arrows for both directions.
+            # Egress arrow near the station end (position ~0.9),
+            # ingress arrow exactly at the site end (position = 1.0).
             ingress_gdf.plot(ax=ax, linewidth=3.5, color=INGRESS_COLOR,
-                             alpha=0.92, zorder=9)
-            _add_route_arrow(ax, ingress_gdf, INGRESS_COLOR, zorder=21)
+                             alpha=0.92, zorder=8)
+            _add_route_arrow(ax, egress_gdf,  EGRESS_COLOR,  position=0.9, zorder=20)
+            _add_route_arrow(ax, ingress_gdf, INGRESS_COLOR, position=1.0, zorder=21)
+        else:
+            if egress_gdf is not None:
+                egress_gdf.plot(ax=ax, linewidth=3.5, color=EGRESS_COLOR,
+                                alpha=0.92, zorder=8)
+                _add_route_arrow(ax, egress_gdf, EGRESS_COLOR, position=0.9, zorder=20)
+
+            if ingress_gdf is not None:
+                ingress_gdf.plot(ax=ax, linewidth=3.5, color=INGRESS_COLOR,
+                                 alpha=0.92, zorder=9)
+                # Arrow head at the site end of the route
+                _add_route_arrow(ax, ingress_gdf, INGRESS_COLOR, position=1.0, zorder=21)
 
         # TO/FROM label at map edge
         base_pt  = _tofrom_pos(st_cen.x, st_cen.y, cx_val, cy_val, MAP_EXTENT)
@@ -331,14 +415,8 @@ def generate_driving(data_type: str, value: str,
 
     # ── Site ──────────────────────────────────────────────────
     site_gdf.plot(ax=ax, facecolor="red", edgecolor="none",
-                  alpha=0.65, zorder=11)
-    ax.text(cx_val, cy_val, "OUT\n IN",
-            fontsize=9, weight="bold", color="white",
-            ha="center", va="center",
-            bbox=dict(facecolor="#cc0000", edgecolor="white",
-                      linewidth=1.5, pad=3, boxstyle="round,pad=0.3"),
-            zorder=16)
-    ax.text(cx_val, cy_val - MAP_EXTENT*0.068, "SITE",
+                  alpha=0.85, zorder=11)
+    ax.text(cx_val, cy_val - MAP_EXTENT*0.06, "SITE",
             color="black", weight="bold", ha="center",
             fontsize=11, zorder=12)
 
@@ -358,8 +436,8 @@ def generate_driving(data_type: str, value: str,
     leg.get_title().set_fontweight("bold")
 
     # ── Axes ──────────────────────────────────────────────────
-    ax.set_xlim(cx_val - MAP_EXTENT*1.05, cx_val + MAP_EXTENT*1.25)
-    ax.set_ylim(cy_val - MAP_EXTENT*1.05, cy_val + MAP_EXTENT*1.05)
+    ax.set_xlim(cx_val - MAP_EXTENT, cx_val + MAP_EXTENT)
+    ax.set_ylim(cy_val - MAP_EXTENT, cy_val + MAP_EXTENT)
     ax.set_aspect("equal")
     _north_arrow(ax, ax.get_xlim(), ax.get_ylim(), MAP_EXTENT)
     ax.set_axis_off()
@@ -370,8 +448,7 @@ def generate_driving(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=130, bbox_inches="tight",
-                facecolor="white")
+    plt.savefig(buf, format="png", dpi=130, facecolor="white")
     plt.close(fig)
     gc.collect()
     return buf

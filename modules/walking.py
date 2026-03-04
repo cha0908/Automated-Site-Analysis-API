@@ -92,7 +92,7 @@ def _add_mtr_icon(ax, x, y, size=0.04, zorder=15):
 # ── Main generator ────────────────────────────────────────────
 
 def generate_walking(data_type: str, value: str,
-                     max_walk_minutes: int = 15):
+                     max_walk_minutes: int = 5):
 
     if max_walk_minutes not in RING_CONFIGS:
         max_walk_minutes = 15
@@ -162,8 +162,9 @@ def generate_walking(data_type: str, value: str,
 
     stations["station_name"] = stations.apply(_name, axis=1)
     stations["dist"] = stations.geometry.centroid.distance(site_point)
-    # ↓ Only top 2 stations — reduces route computations
-    stations = stations.sort_values("dist").head(3)
+    # Keep up to 3 nearest stations, but only within the map extent
+    stations = stations.sort_values("dist")
+    stations = stations[stations["dist"] <= MAP_EXTENT].head(3)
 
     gc.collect()
 
@@ -188,7 +189,7 @@ def generate_walking(data_type: str, value: str,
         })
 
     # ── Plot — use lower DPI to save RAM during rendering ─────
-    fig, ax = plt.subplots(figsize=(10, 10))   # slightly smaller figure
+    fig, ax = plt.subplots(figsize=(12, 12))   # slightly smaller figure
 
     roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
     del roads   # free road memory before basemap fetch
@@ -230,9 +231,9 @@ def generate_walking(data_type: str, value: str,
 
     site_gdf.plot(ax=ax, facecolor="red", edgecolor="none")
     ax.text(site_point.x, site_point.y - (MAP_EXTENT * 0.06),
-            "SITE", color="red", weight="bold", ha="center", fontsize=11)
+            "SITE", color="black", weight="bold", ha="center", fontsize=11)
 
-    ax.set_xlim(site_point.x - MAP_EXTENT, site_point.x + MAP_EXTENT * 1.15)
+    ax.set_xlim(site_point.x - MAP_EXTENT, site_point.x + MAP_EXTENT)
     ax.set_ylim(site_point.y - MAP_EXTENT, site_point.y + MAP_EXTENT)
     ax.set_aspect("equal")
 

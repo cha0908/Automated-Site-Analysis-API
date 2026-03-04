@@ -300,10 +300,9 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     ax.set_axis_off()
 
-    ax.set_position([0.02, 0.02, 0.96, 0.96])
-
     buffer = BytesIO()
     plt.tight_layout()
+    ax.set_position([0.02, 0.02, 0.96, 0.96])
     plt.savefig(buffer, format="png", dpi=120)
     plt.close(fig)
 
