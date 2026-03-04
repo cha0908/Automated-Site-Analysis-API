@@ -10,7 +10,7 @@ from shapely.geometry import Point
 from sklearn.cluster import KMeans
 from io import BytesIO
 
-# ✅ UNIVERSAL RESOLVER
+# UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
