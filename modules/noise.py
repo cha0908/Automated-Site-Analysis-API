@@ -176,7 +176,7 @@ def generate_noise(data_type: str, value: str):
     # PLOT
     # --------------------------------------------------------
 
-    fig, ax = plt.subplots(figsize=(10,10))
+    fig, ax = plt.subplots(figsize=(12,12))
 
     center = site_polygon.centroid
 
