@@ -235,14 +235,15 @@ def _north_arrow(ax, xlim, ylim, extent):
 def generate_driving(data_type: str, value: str,
                      zone_data: gpd.GeoDataFrame = None,
                      lon: float = None, lat: float = None,
+                     lot_ids: list = None, extents: list = None,
                      max_drive_minutes: int = 15):
 
     if max_drive_minutes not in RING_CONFIGS:
         max_drive_minutes = 15
     cfg        = RING_CONFIGS[max_drive_minutes]
     MAP_EXTENT = cfg["map_extent"]
-
-    lon, lat = resolve_location(data_type, value, lon, lat)
+                         
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
     site_pt_3857 = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
