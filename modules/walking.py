@@ -100,7 +100,7 @@ def generate_walking(data_type: str, value: str,
     cfg        = RING_CONFIGS[max_walk_minutes]
     MAP_EXTENT = cfg["map_extent"]
 
-    lon, lat = resolve_location(data_type, value)
+    lon, lat = resolve_location(data_type, value, lon, lat)
 
     # ── Site footprint ────────────────────────────────────────
     lot_gdf = get_lot_boundary(lon, lat, data_type)
