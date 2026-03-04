@@ -4,6 +4,7 @@ matplotlib.use("Agg")
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from typing import Optional                          # ← NEW
 from io import BytesIO
 import geopandas as gpd
 import os
@@ -102,8 +103,8 @@ print("Startup complete.")
 class LocationRequest(BaseModel):
     data_type: str
     value:     str
-    lon:       float = None   # pre-resolved coords for ADDRESS type
-    lat:       float = None
+    lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
+    lat:       Optional[float] = None   # None for LOT type — resolver handles it
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
@@ -154,16 +155,6 @@ def _looks_like_lot_id(q: str) -> bool:
 
 @app.get("/search")
 def search(q: str, limit: int = 100):
-    """
-    Unified lot / address / building name search.
-
-    GET /search?q=STTL+467        → lot search only
-    GET /search?q=IL+1657         → lot search only
-    GET /search?q=NKIL            → lot search only (100 results)
-    GET /search?q=The+Lily        → address/building search only
-    GET /search?q=129+Repulse+Bay → address search only
-    GET /search?q=Sha+Tin         → address/area search
-    """
     q = q.strip()
     if not q:
         return {"count": 0, "results": []}
@@ -185,15 +176,13 @@ def search(q: str, limit: int = 100):
             ref_id  = attrs.get("Ref_ID", "")
             address = c.get("address", "").strip()
             key     = f"LOT_{ref_id or lot_id}"
-
             if key in seen:
                 continue
             seen.add(key)
-
             results.append({
-                "lot_id":    lot_id,        # passed directly to resolver.py
+                "lot_id":    lot_id,
                 "name":      lot_id,
-                "address":   address,       # e.g. "STTL 467, Sha Tin Heights, Sha Tin"
+                "address":   address,
                 "district":  attrs.get("City", ""),
                 "ref_id":    ref_id,
                 "data_type": "LOT",
@@ -205,7 +194,6 @@ def search(q: str, limit: int = 100):
         logging.warning(f"/search lot lookup failed: {e}")
 
     # ── 2. ADDRESS / BUILDING NAME SEARCH ─────────────────────
-    # Skipped when query looks like a lot ID — avoids noisy unrelated results
     if not is_lot:
         try:
             resp = requests.get(
@@ -218,22 +206,19 @@ def search(q: str, limit: int = 100):
                 address_en = str(s.get("addressEN", "")).strip()
                 district   = str(s.get("districtEN","")).strip()
                 key        = f"ADDR_{address_en}_{name_en}"
-
                 if key in seen:
                     continue
                 seen.add(key)
-
                 try:
                     lon, lat = _transformer_2326_to_4326.transform(
                         s.get("x"), s.get("y")
                     )
                 except Exception:
                     lon, lat = None, None
-
                 results.append({
-                    "lot_id":    address_en,    # address used as display ID
-                    "name":      name_en,       # e.g. "The Lily (Previous Name)"
-                    "address":   address_en,    # e.g. "129 REPULSE BAY ROAD"
+                    "lot_id":    address_en,
+                    "name":      name_en,
+                    "address":   address_en,
                     "district":  district,
                     "ref_id":    "",
                     "data_type": "ADDRESS",
@@ -255,12 +240,8 @@ def search(q: str, limit: int = 100):
 def walking(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "walking",
-            generate_walking,
-            req.data_type,
-            req.value
+            req.data_type, req.value, "walking",
+            generate_walking, req.data_type, req.value
         )
         return image_response(img)
     except Exception as e:
@@ -271,13 +252,8 @@ def walking(req: LocationRequest):
 def driving(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "driving",
-            generate_driving,
-            req.data_type,
-            req.value,
-            ZONE_DATA
+            req.data_type, req.value, "driving",
+            generate_driving, req.data_type, req.value, ZONE_DATA
         )
         return image_response(img)
     except Exception as e:
@@ -288,12 +264,8 @@ def driving(req: LocationRequest):
 def transport(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "transport",
-            generate_transport,
-            req.data_type,
-            req.value
+            req.data_type, req.value, "transport",
+            generate_transport, req.data_type, req.value
         )
         return image_response(img)
     except Exception as e:
@@ -304,13 +276,8 @@ def transport(req: LocationRequest):
 def context(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "context",
-            generate_context,
-            req.data_type,
-            req.value,
-            ZONE_DATA
+            req.data_type, req.value, "context",
+            generate_context, req.data_type, req.value, ZONE_DATA
         )
         return image_response(img)
     except Exception as e:
@@ -321,13 +288,8 @@ def context(req: LocationRequest):
 def view(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "view",
-            generate_view,
-            req.data_type,
-            req.value,
-            BUILDING_DATA
+            req.data_type, req.value, "view",
+            generate_view, req.data_type, req.value, BUILDING_DATA
         )
         return image_response(img)
     except Exception as e:
@@ -338,12 +300,8 @@ def view(req: LocationRequest):
 def noise(req: LocationRequest):
     try:
         img = run_analysis(
-            req.data_type,
-            req.value,
-            "noise",
-            generate_noise,
-            req.data_type,
-            req.value
+            req.data_type, req.value, "noise",
+            generate_noise, req.data_type, req.value
         )
         return image_response(img)
     except Exception as e:
@@ -399,20 +357,19 @@ def generate_pdf_report(data_type: str, value: str):
 
     logging.info("Generating report images...")
 
-    walking_5    = generate_walking(data_type, value, 5)
-    walking_15   = generate_walking(data_type, value, 15)
-    driving_img  = generate_driving(data_type, value, ZONE_DATA)
+    walking_5     = generate_walking(data_type, value, 5)
+    walking_15    = generate_walking(data_type, value, 15)
+    driving_img   = generate_driving(data_type, value, ZONE_DATA)
     transport_img = generate_transport(data_type, value)
-    context_img  = generate_context(data_type, value, ZONE_DATA)
-    view_img     = generate_view(data_type, value, BUILDING_DATA)
-    noise_img    = generate_noise(data_type, value)
+    context_img   = generate_context(data_type, value, ZONE_DATA)
+    view_img      = generate_view(data_type, value, BUILDING_DATA)
+    noise_img     = generate_noise(data_type, value)
 
     images = [
         walking_5, walking_15, driving_img, transport_img,
         context_img, view_img, noise_img,
     ]
 
-    # Cover page
     site_label = f"{data_type} {value}"
     elements.append(Spacer(1, 3 * inch))
     elements.append(Paragraph("Site Analysis Report", title_style))
