@@ -38,10 +38,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ── Cache ─────────────────────────────────────────────────────
 CACHE_STORE = {}
@@ -61,7 +58,6 @@ BUILDING_DATA = gpd.read_file(os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")).t
 if "HEIGHT_M" not in BUILDING_DATA.columns:
     raise ValueError(f"HEIGHT_M column not found. Available: {BUILDING_DATA.columns}")
 BUILDING_DATA = BUILDING_DATA[BUILDING_DATA["HEIGHT_M"] > 5]
-
 print("Startup complete.")
 
 # ── Request model ─────────────────────────────────────────────
@@ -100,10 +96,7 @@ def run_analysis(data_type, value, analysis_type, func, *args):
 
 # ── Search helpers ────────────────────────────────────────────
 _t2326_4326 = Transformer.from_crs(2326, 4326, always_xy=True)
-LOT_PREFIXES = (
-    "IL","NKIL","KIL","STTL","STL","TML","TPTL",
-    "DD","RBL","KCTL","ML","GLA","LPP"
-)
+LOT_PREFIXES = ("IL","NKIL","KIL","STTL","STL","TML","TPTL","DD","RBL","KCTL","ML","GLA","LPP")
 
 def _looks_like_lot_id(q):
     return any(q.upper().strip().startswith(p) for p in LOT_PREFIXES)
@@ -191,7 +184,7 @@ def search(q: str, limit: int = 100):
 
 # ── /lot-boundary ─────────────────────────────────────────────
 # Called by the frontend Leaflet map to draw the polygon in the
-# "Your Site Preview" panel. Returns merged GeoJSON in WGS84.
+# "Site Preview" panel. Returns merged GeoJSON polygon in WGS84.
 # Single: GET /lot-boundary?lon=114.15&lat=22.28&data_type=LOT
 # Multi:  GET /lot-boundary?lon=...&lat=...&extents=[{...},{...}]
 @app.get("/lot-boundary")
@@ -285,6 +278,8 @@ def noise(req: LocationRequest):
 
 
 # ── PDF report ────────────────────────────────────────────────
+# NOTE: generate_pdf_report now accepts lot_ids + extents and passes
+# them to every module call so multi-lot sites render correctly.
 def generate_pdf_report(data_type: str, value: str,
                          lon: float = None, lat: float = None,
                          lot_ids: list = None, extents: list = None):
@@ -312,7 +307,7 @@ def generate_pdf_report(data_type: str, value: str,
 
     logging.info("Generating report images...")
 
-    # All module calls pass the full lot_ids + extents
+    # All 7 module calls pass full lot_ids + extents for multi-lot support
     imgs = [
         generate_walking(data_type, value, 5,  lon, lat, lot_ids, extents),
         generate_walking(data_type, value, 15, lon, lat, lot_ids, extents),
