@@ -8,7 +8,7 @@ from shapely.geometry import Point, Polygon
 from matplotlib.patches import Wedge, Patch
 from io import BytesIO
 
-# ✅ IMPORT UNIVERSAL RESOLVER
+# IMPORT UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
@@ -25,10 +25,12 @@ SECTOR_SIZE = 20
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame):
+def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame,
+                  lon: float = None, lat: float = None,
+                  lot_ids: list = None, extents: list = None):
 
-    # ✅ Dynamic resolver
-    lon, lat = resolve_location(data_type, value)
+    # Dynamic resolver
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
     # --------------------------------------------------------
     # SITE POLYGON (official lot boundary or OSM fallback)
