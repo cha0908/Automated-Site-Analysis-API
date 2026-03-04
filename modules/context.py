@@ -5,7 +5,7 @@ import contextily as cx
 import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
-
+from typing import Optional
 from shapely.geometry import Point
 from sklearn.cluster import KMeans
 from io import BytesIO
@@ -50,13 +50,15 @@ def context_rules(site_type):
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
+def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, radius_m:Optional[int] = None):
 
     # --------------------------------------------------------
     # RESOLVE LOCATION
     # --------------------------------------------------------
 
     lon, lat = resolve_location(data_type, value)
+    fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
+    half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
 
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
@@ -87,7 +89,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     polygons = ox.features_from_point(
         (lat, lon),
-        dist=FETCH_RADIUS,
+        dist=fetch_r,
         tags={"landuse":True,"leisure":True,"amenity":True,"building":True}
     ).to_crs(3857)
 
@@ -162,15 +164,15 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
 
     fig, ax = plt.subplots(figsize=(12,12))
 
-    ax.set_xlim(site_point.x - MAP_HALF_SIZE, site_point.x + MAP_HALF_SIZE)
-    ax.set_ylim(site_point.y - MAP_HALF_SIZE, site_point.y + MAP_HALF_SIZE)
+    ax.set_xlim(site_point.x - half_size, site_point.x + half_size)
+    ax.set_ylim(site_point.y - half_size, site_point.y + half_size)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
     cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=16, alpha=0.95)
 
-    ax.set_xlim(site_point.x - MAP_HALF_SIZE, site_point.x + MAP_HALF_SIZE)
-    ax.set_ylim(site_point.y - MAP_HALF_SIZE, site_point.y + MAP_HALF_SIZE)
+    ax.set_xlim(site_point.x - half_size, site_point.x + half_size)
+    ax.set_ylim(site_point.y - half_size, site_point.y + half_size)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
@@ -183,7 +185,7 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame):
     if not bus_stops.empty:
         bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
 
-    stations_in_view = stations[stations["dist"] <= MAP_HALF_SIZE] if not stations.empty else stations
+    stations_in_view = stations[stations["dist"] <= half_size] if not stations.empty else stations
     if not stations_in_view.empty:
         stations_in_view.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none", alpha=0.9, zorder=10)
 

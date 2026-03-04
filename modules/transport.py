@@ -1,3 +1,4 @@
+from typing import Optional
 import matplotlib
 matplotlib.use("Agg")
 
@@ -140,11 +141,11 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 # MAIN GENERATOR
 # ============================================================
 
-def generate_transport(data_type: str, value: str):
+def generate_transport(data_type: str, value: str, radius_m: Optional[int] = None):
 
     # Dynamic resolver
     lon, lat = resolve_location(data_type, value)
-
+    r = radius_m if radius_m is not None else MAP_RADIUS
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
@@ -161,7 +162,7 @@ def generate_transport(data_type: str, value: str):
 
     def safe_fetch(tags):
         try:
-            gdf = ox.features_from_point((lat, lon), dist=MAP_RADIUS, tags=tags)
+            gdf = ox.features_from_point((lat, lon), dist=r, tags=tags)
             if not gdf.empty:
                 return gdf.to_crs(3857)
             return gpd.GeoDataFrame(geometry=[], crs=3857)

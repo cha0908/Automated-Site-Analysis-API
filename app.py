@@ -104,11 +104,11 @@ class LocationRequest(BaseModel):
     value:     str
     lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
     lat:       Optional[float] = None   # None for LOT type — resolver handles it
-    
-class WalkingRequest(BaseModel):
-    data_type: str
-    value: str
-    max_walk_minutes: Optional[int] = None     
+    # Scope (optional); each endpoint uses only what it needs
+    max_walk_minutes:    Optional[int] = None   # walking
+    max_drive_minutes:   Optional[int] = None   # driving
+    context_radius_m:    Optional[int] = None   # context
+    transport_radius_m:  Optional[int] = None   # transport
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
@@ -242,10 +242,12 @@ def search(q: str, limit: int = 100):
 
 @app.post("/walking")
 def walking(req: LocationRequest):
+    minutes = req.max_walk_minutes if req.max_walk_minutes is not None else 5
+    analysis_type = f"walking_{minutes}"
     try:
         img = run_analysis(
-            req.data_type, req.value, "walking",
-            generate_walking, req.data_type, req.value
+            req.data_type, req.value, analysis_type,
+            generate_walking, req.data_type, req.value, minutes
         )
         return image_response(img)
     except Exception as e:
@@ -254,10 +256,12 @@ def walking(req: LocationRequest):
 
 @app.post("/driving")
 def driving(req: LocationRequest):
+    minutes = req.max_drive_minutes if req.max_drive_minutes is not None else 15
+    analysis_type = f"driving_{minutes}"
     try:
         img = run_analysis(
-            req.data_type, req.value, "driving",
-            generate_driving, req.data_type, req.value, ZONE_DATA
+            req.data_type, req.value, analysis_type,
+            generate_driving, req.data_type, req.value, ZONE_DATA, minutes
         )
         return image_response(img)
     except Exception as e:
@@ -266,10 +270,12 @@ def driving(req: LocationRequest):
 
 @app.post("/transport")
 def transport(req: LocationRequest):
+    radius = req.transport_radius_m
+    analysis_type = f"transport_{radius}" if radius is not None else "transport"
     try:
         img = run_analysis(
-            req.data_type, req.value, "transport",
-            generate_transport, req.data_type, req.value
+            req.data_type, req.value, analysis_type,
+            generate_transport, req.data_type, req.value, radius
         )
         return image_response(img)
     except Exception as e:
@@ -278,10 +284,12 @@ def transport(req: LocationRequest):
 
 @app.post("/context")
 def context(req: LocationRequest):
+    radius = req.context_radius_m
+    analysis_type = f"context_{radius}" if radius is not None else "context"
     try:
         img = run_analysis(
-            req.data_type, req.value, "context",
-            generate_context, req.data_type, req.value, ZONE_DATA
+            req.data_type, req.value, analysis_type,
+            generate_context, req.data_type, req.value, ZONE_DATA, radius
         )
         return image_response(img)
     except Exception as e:

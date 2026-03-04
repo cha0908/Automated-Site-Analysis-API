@@ -760,15 +760,15 @@ class NoiseVisualizer:
         v = noise[np.isfinite(noise)]
         if len(v):
             ax.text(
-                xl[1] - 0.01 * (xl[1] - xl[0]),
-                yl[0] + 0.01 * (yl[1] - yl[0]),
-                f"Max:  {v.max():.1f} dB(A)\n"
-                f"Mean: {v.mean():.1f} dB(A)\n"
-                f"Min:  {v.min():.1f} dB(A)\n"
-                f"Src:  {meta.get('L_source_range', '-')}",
-                fontsize=8, ha="right", va="bottom", zorder=30,
-                bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                          edgecolor="#aaa", alpha=0.88),
+            xl[1] - 0.01 * (xl[1] - xl[0]),
+            yl[0] + 0.01 * (yl[1] - yl[0]),
+            f"Max:  {v.max():.1f} dB(A)\n"
+            f"Mean: {v.mean():.1f} dB(A)\n"
+            f"Min:  {v.min():.1f} dB(A)\n"
+            f"Src:  {meta.get('L_source_range', '-')}",
+            fontsize=8, ha="right", va="bottom", zorder=30,
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                    edgecolor="#aaa", alpha=0.88),
             )
 
         mask_d = self.cfg.get("road_mask_distance", 80)
