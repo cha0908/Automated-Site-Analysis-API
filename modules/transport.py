@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 import matplotlib
 matplotlib.use("Agg")
 
