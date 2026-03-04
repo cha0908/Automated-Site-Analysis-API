@@ -7,36 +7,19 @@ import geopandas as gpd
 from shapely.geometry import Point
 
 BASE_URL = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-LOT_INDEX_BBOX_M = 300  # half-side in metres; full bbox ≤ 750×600m per API
+LOT_INDEX_BBOX_M = 300
 
 ALLOWED_TYPES = [
-    "LOT",
-    "STT",
-    "GLA",
-    "LPP",
-    "UN",
-    "BUILDINGCSUID",
-    "LOTCSUID",
-    "PRN",
-    "ADDRESS",   # ← NEW: pre-resolved from /search address results
+    "LOT", "STT", "GLA", "LPP", "UN",
+    "BUILDINGCSUID", "LOTCSUID", "PRN", "ADDRESS",
 ]
 
-# Lot Index API path: LOT/GLA/STT only; others fall back to "lot"
 _LOT_INDEX_TYPE = {"GLA": "gla", "STT": "stt"}
 _LOT_BOUNDARY_CACHE = {}
 
 
 def get_lot_boundary(lon: float, lat: float, data_type: str):
-    """
-    Fetch official lot boundary from LandsD iC1000 API (HK80). Returns a single-row
-    GeoDataFrame in EPSG:3857, or None if unavailable. Result is cached by (lon, lat, type).
-
-    For ADDRESS type, boundary lookup still runs using lon/lat — returns None
-    gracefully if no lot boundary exists at that coordinate.
-    """
     data_type = data_type.upper()
-
-    # ADDRESS type has no lot boundary — return None immediately
     if data_type == "ADDRESS":
         return None
 
@@ -87,10 +70,9 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
                 _LOT_BOUNDARY_CACHE[cache_key] = out
                 return out
 
-        # Point not inside any polygon: use closest (e.g. on boundary)
         gdf["_dist"] = gdf.geometry.distance(pt)
         idx = gdf["_dist"].idxmin()
-        if gdf.loc[idx, "_dist"] < 0.0005:  # ~50m in degrees at HK lat
+        if gdf.loc[idx, "_dist"] < 0.0005:
             out = gpd.GeoDataFrame(geometry=[gdf.loc[idx, "geometry"]], crs=4326).to_crs(3857)
             _LOT_BOUNDARY_CACHE[cache_key] = out
             return out
@@ -105,16 +87,12 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
 def resolve_location(data_type: str, value: str,
                      lon: float = None, lat: float = None):
     """
-    Resolves a lot ID or address to (lon, lat) in WGS84 (EPSG:4326).
-
-    For ADDRESS type: coords are pre-resolved during /search and passed
-    directly — skips the Government GIS API call entirely.
-
-    For all other types: calls the Government GIS SearchNumber API.
+    Resolves to (lon, lat) in WGS84.
+    ADDRESS type: returns pre-resolved coords directly.
+    All other types: calls HK Gov GIS SearchNumber API.
     """
     data_type = data_type.upper()
 
-    # ── ADDRESS: coords already resolved in /search ───────────
     if data_type == "ADDRESS":
         if lon is not None and lat is not None:
             return lon, lat
@@ -122,7 +100,6 @@ def resolve_location(data_type: str, value: str,
             "ADDRESS type requires pre-resolved lon/lat from /search results."
         )
 
-    # ── All other lot types ───────────────────────────────────
     if data_type not in ALLOWED_TYPES:
         raise ValueError(f"Unsupported data type: {data_type}")
 
@@ -130,7 +107,6 @@ def resolve_location(data_type: str, value: str,
         f"{BASE_URL}/lus/{data_type.lower()}/SearchNumber"
         f"?text={value.replace(' ', '%20')}"
     )
-
     response = requests.get(url)
 
     if response.status_code != 200:
@@ -142,7 +118,6 @@ def resolve_location(data_type: str, value: str,
         raise ValueError("No matching result found.")
 
     best = max(data["candidates"], key=lambda x: x.get("score", 0))
-
     x2326 = best["location"]["x"]
     y2326 = best["location"]["y"]
 
