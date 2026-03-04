@@ -806,10 +806,9 @@ class NoiseVisualizer:
 # PUBLIC API ENTRY POINT
 # ============================================================
 
-def generate_noise(data_type: str, value: str) -> BytesIO:
-    cfg = CFG.copy()
-
-    lon, lat = resolve_location(data_type, value)
+def generate_noise(data_type: str, value: str,
+                   lon: float = None, lat: float = None) -> BytesIO:
+    lon, lat = resolve_location(data_type, value, lon, lat)
 
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
