@@ -1,20 +1,13 @@
 # ============================================================
 # modules/noise.py
-# Traffic-Based Environmental Noise Modelling Engine v2.10
+# Traffic-Based Environmental Noise Modelling Engine v2.11
 # Adapted for Automated-Site-Analysis-API
 # ============================================================
-# Live data sources:
-#   - ATC stations  : CSDI HK WFS (real traffic counts)
-#   - LNRS zones    : CSDI HK WFS (noise sensitive receivers)
-#   - Roads/buildings: OpenStreetMap via OSMnx
-#   - Basemap       : CartoDB / OSM via Contextily
-#
-# FIX R — Road proximity mask (no bleed into parks/water)
-# FIX S — Colorbar clamped to [50, 70] dB
-# FIX T — EPD threshold lines + floating legend
-#
-# API contract (unchanged):
-#   generate_noise(data_type: str, value: str) -> BytesIO
+# FIX U — Plot zoom: added "plot_radius" config key (default 100m)
+#          Map view is now cropped to plot_radius independently of
+#          study_radius (150m). Matches the tight zoom of the Colab
+#          output. Change plot_radius in CFG to adjust zoom level.
+# + all v2.10 fixes retained
 # ============================================================
 
 import gc
@@ -50,7 +43,7 @@ ox.settings.log_console = False
 
 
 # ============================================================
-# CONFIG — all tunable parameters, no hardcoded acoustics
+# CONFIG
 # ============================================================
 
 CFG = {
@@ -69,7 +62,7 @@ CFG = {
     ),
     "wfs_timeout": 30,
 
-    # Propagation
+    # Propagation (unchanged — noise is computed over full study_radius)
     "study_radius":      150,
     "grid_resolution":     5,
     "densify_spacing":     5.0,
@@ -112,6 +105,11 @@ CFG = {
     "lnrs_correction_db": -3.0,
 
     # Visualisation
+    # FIX U: plot_radius controls map view crop, independent of study_radius.
+    # study_radius=150 fetches & propagates over 150m, but the map only
+    # displays the inner plot_radius metres — matching the Colab tight zoom.
+    # Decrease to zoom in more, increase to show more context.
+    "plot_radius":         100,   # metres shown on map (was implicitly 150 = study_radius)
     "basemap_zoom":        19,
     "contour_levels_min":  50,
     "contour_levels_max":  70,
@@ -201,7 +199,6 @@ class ATCWFSLoader:
         for _, row in gdf.iterrows():
             sid = _normalise_station_id(row[id_col] if id_col else str(row.name))
 
-            # Flow — prefer peak-hour columns; convert AADT if needed
             flow = None
             for fc in flow_cols:
                 try:
@@ -215,7 +212,6 @@ class ATCWFSLoader:
                 except Exception:
                     continue
 
-            # Heavy %
             heavy = None
             if heavy_col:
                 try:
@@ -225,7 +221,6 @@ class ATCWFSLoader:
                 except Exception:
                     pass
 
-            # Speed
             speed = None
             if speed_col:
                 try:
@@ -477,7 +472,7 @@ class EmissionEngine:
 
 
 # ============================================================
-# PHASE 4 — PROPAGATION (FIX R)
+# PHASE 4 — PROPAGATION
 # ============================================================
 
 class PropagationEngine:
@@ -613,7 +608,7 @@ class PropagationEngine:
 
 
 # ============================================================
-# PHASE 5 — VISUALISATION (FIX S + FIX T)
+# PHASE 5 — VISUALISATION
 # ============================================================
 
 class NoiseVisualizer:
@@ -677,9 +672,15 @@ class NoiseVisualizer:
         ax.set_facecolor("#e8f0e8")
 
         c = site_poly.centroid
-        R = float(self.cfg["study_radius"])
-        ax.set_xlim(c.x - R, c.x + R)
-        ax.set_ylim(c.y - R, c.y + R)
+
+        # FIX U: use plot_radius for the map VIEW, not study_radius.
+        # Propagation still runs over the full study_radius (150m) so
+        # noise near edges is accurate, but the displayed area is the
+        # tighter plot_radius crop — matching the Colab zoom level.
+        R_study = float(self.cfg["study_radius"])
+        R_plot  = float(self.cfg.get("plot_radius", R_study))  # default: no crop
+        ax.set_xlim(c.x - R_plot, c.x + R_plot)
+        ax.set_ylim(c.y - R_plot, c.y + R_plot)
         ax.set_aspect("equal")
         self._add_basemap(ax)
 
@@ -715,14 +716,12 @@ class NoiseVisualizer:
                 path_effects=[pe.withStroke(linewidth=3,
                                             foreground="#e63946")])
 
-        # FIX S — colorbar
         cbar = plt.colorbar(cont, ax=ax, fraction=0.028, pad=0.02, aspect=30)
         cbar.set_label("Noise Level  Leq dB(A)", fontsize=10, labelpad=8)
         cbar.set_ticks(levels)
         cbar.set_ticklabels([f"{int(l)}" for l in levels])
         cbar.ax.tick_params(labelsize=8)
 
-        # FIX T — EPD threshold lines + floating legend
         epd_items = []
         for thresh, lbl, col in [
             (65, "65 dB(A) - HK EPD Day limit",   "#e67e22"),
@@ -744,11 +743,11 @@ class NoiseVisualizer:
             )
             leg.set_zorder(35)
 
-        # North arrow
+        # North arrow — scaled to plot_radius
         xl, yl = ax.get_xlim(), ax.get_ylim()
         nx = xl[0] + 0.06 * (xl[1] - xl[0])
         ny = yl[0] + 0.88 * (yl[1] - yl[0])
-        La = R * 0.055
+        La = R_plot * 0.055
         ax.annotate(
             "", xy=(nx, ny + La), xytext=(nx, ny - La),
             arrowprops=dict(arrowstyle="-|>", color="#111",
@@ -758,7 +757,6 @@ class NoiseVisualizer:
         ax.text(nx, ny + La * 1.45, "N", fontsize=11, weight="bold",
                 color="#111", ha="center", va="center", zorder=25)
 
-        # Stats box
         v = noise[np.isfinite(noise)]
         if len(v):
             ax.text(
@@ -778,10 +776,10 @@ class NoiseVisualizer:
         ax.set_title(
             f"Near-Site Environmental Noise Assessment\n"
             f"{meta['type']} {meta['value']}  "
-            f"[R={int(R)}m  dx={self.cfg['grid_resolution']}m  "
+            f"[R={int(R_study)}m  view={int(R_plot)}m  "
             f"LNRS={meta.get('lnrs_roads', 0)} roads]\n"
             f"Canyon per-road - Road mask {mask_d}m - "
-            f"Colorbar 50-{cb_max} dB  [v2.10]",
+            f"Colorbar 50-{cb_max} dB  [v2.11]",
             fontsize=12, weight="bold", pad=10,
         )
         ax.text(
@@ -809,17 +807,10 @@ class NoiseVisualizer:
 # ============================================================
 
 def generate_noise(data_type: str, value: str) -> BytesIO:
-    """
-    Drop-in replacement for the original generate_noise().
-    Fetches live ATC + LNRS data from CSDI HK WFS APIs.
-    Returns a BytesIO PNG.
-    """
     cfg = CFG.copy()
 
-    # 1. Resolve coordinates via existing API resolver
     lon, lat = resolve_location(data_type, value)
 
-    # 2. Site polygon
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
         site_polygon = lot_gdf.geometry.iloc[0]
@@ -841,7 +832,6 @@ def generate_noise(data_type: str, value: str) -> BytesIO:
             site_polygon = pt.buffer(40)
         site_gdf = gpd.GeoDataFrame(geometry=[site_polygon], crs=3857)
 
-    # 3. Roads from OSM
     try:
         roads = ox.features_from_point(
             (lat, lon), dist=cfg["study_radius"], tags={"highway": True}
@@ -855,7 +845,6 @@ def generate_noise(data_type: str, value: str) -> BytesIO:
     except Exception as e:
         raise ValueError(f"Road fetch failed: {e}") from e
 
-    # 4. Buildings from OSM
     try:
         bld = ox.features_from_point(
             (lat, lon), dist=cfg["study_radius"], tags={"building": True}
@@ -866,23 +855,17 @@ def generate_noise(data_type: str, value: str) -> BytesIO:
         log.warning(f"  Buildings fetch failed: {e}")
         bld = gpd.GeoDataFrame(geometry=[], crs=3857)
 
-    # 5. Live ATC traffic data from CSDI HK WFS
     atc_data = ATCWFSLoader(cfg).load()
-
-    # 6. Live LNRS zones from CSDI HK WFS
     lnrs_gdf = LNRSWFSLoader(cfg).load()
 
-    # 7. Assign traffic + LNRS + canyon, compute emission
     roads = TrafficAssigner(atc_data, cfg).assign(roads)
     roads = LNRSAssigner(lnrs_gdf, cfg).assign(roads)
     roads = CanyonAssigner(bld, cfg).assign(roads)
     roads = EmissionEngine(cfg).compute(roads)
 
-    # 8. Propagate
     Lv = roads["L_link"].values
     X, Y, noise = PropagationEngine(cfg).run(roads, site_polygon)
 
-    # 9. Render and return BytesIO
     meta = {
         "type":           data_type,
         "value":          value,
@@ -893,4 +876,3 @@ def generate_noise(data_type: str, value: str) -> BytesIO:
     return NoiseVisualizer(cfg).render(
         X, Y, noise, site_polygon, site_gdf, bld, roads, meta
     )
-   

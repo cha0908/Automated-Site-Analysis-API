@@ -17,7 +17,8 @@ ALLOWED_TYPES = [
     "UN",
     "BUILDINGCSUID",
     "LOTCSUID",
-    "PRN"
+    "PRN",
+    "ADDRESS",   # ← NEW: pre-resolved from /search address results
 ]
 
 # Lot Index API path: LOT/GLA/STT only; others fall back to "lot"
@@ -29,8 +30,16 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
     """
     Fetch official lot boundary from LandsD iC1000 API (HK80). Returns a single-row
     GeoDataFrame in EPSG:3857, or None if unavailable. Result is cached by (lon, lat, type).
+
+    For ADDRESS type, boundary lookup still runs using lon/lat — returns None
+    gracefully if no lot boundary exists at that coordinate.
     """
     data_type = data_type.upper()
+
+    # ADDRESS type has no lot boundary — return None immediately
+    if data_type == "ADDRESS":
+        return None
+
     cache_key = (round(lon, 5), round(lat, 5), data_type)
     if cache_key in _LOT_BOUNDARY_CACHE:
         return _LOT_BOUNDARY_CACHE[cache_key]
@@ -62,6 +71,7 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
                     os.unlink(tmp_path)
                 except Exception:
                     pass
+
         if gdf.empty or "geometry" not in gdf.columns:
             _LOT_BOUNDARY_CACHE[cache_key] = None
             return None
@@ -70,6 +80,7 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
             gdf.set_crs(2326, inplace=True)
         gdf = gdf.to_crs(4326)
         pt = Point(lon, lat)
+
         for idx, row in gdf.iterrows():
             if row.geometry and row.geometry.contains(pt):
                 out = gpd.GeoDataFrame(geometry=[row.geometry], crs=4326).to_crs(3857)
@@ -83,6 +94,7 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
             out = gpd.GeoDataFrame(geometry=[gdf.loc[idx, "geometry"]], crs=4326).to_crs(3857)
             _LOT_BOUNDARY_CACHE[cache_key] = out
             return out
+
     except Exception as e:
         logging.getLogger(__name__).debug("get_lot_boundary failed: %s", e)
 
@@ -90,10 +102,27 @@ def get_lot_boundary(lon: float, lat: float, data_type: str):
     return None
 
 
-def resolve_location(data_type: str, value: str):
+def resolve_location(data_type: str, value: str,
+                     lon: float = None, lat: float = None):
+    """
+    Resolves a lot ID or address to (lon, lat) in WGS84 (EPSG:4326).
 
+    For ADDRESS type: coords are pre-resolved during /search and passed
+    directly — skips the Government GIS API call entirely.
+
+    For all other types: calls the Government GIS SearchNumber API.
+    """
     data_type = data_type.upper()
 
+    # ── ADDRESS: coords already resolved in /search ───────────
+    if data_type == "ADDRESS":
+        if lon is not None and lat is not None:
+            return lon, lat
+        raise ValueError(
+            "ADDRESS type requires pre-resolved lon/lat from /search results."
+        )
+
+    # ── All other lot types ───────────────────────────────────
     if data_type not in ALLOWED_TYPES:
         raise ValueError(f"Unsupported data type: {data_type}")
 
