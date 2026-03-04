@@ -146,7 +146,7 @@ def generate_transport(data_type: str, value: str,
                        radius_m: Optional[int] = None,
                        lon: float = None, lat: float = None,
                        lot_ids: List[str] = None, extents: List[dict] = None):
-    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     r = radius_m if radius_m is not None else MAP_RADIUS
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
