@@ -102,11 +102,13 @@ print("Startup complete.")
 class LocationRequest(BaseModel):
     data_type: str
     value:     str
+    lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
+    lat:       Optional[float] = None   # None for LOT type — resolver handles it
+    
 class WalkingRequest(BaseModel):
     data_type: str
     value: str
-    max_walk_minutes: Optional[int] = None l    lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
-    lat:       Optional[float] = None   # None for LOT type — resolver handles it
+    max_walk_minutes: Optional[int] = None     
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
