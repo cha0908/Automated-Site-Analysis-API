@@ -92,7 +92,8 @@ def _add_mtr_icon(ax, x, y, size=0.04, zorder=15):
 # ── Main generator ────────────────────────────────────────────
 
 def generate_walking(data_type: str, value: str,
-                     max_walk_minutes: int = 5):
+                     max_walk_minutes: int = 5,
+                     lon: float = None, lat: float = None):
 
     if max_walk_minutes not in RING_CONFIGS:
         max_walk_minutes = 15
