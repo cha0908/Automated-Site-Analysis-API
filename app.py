@@ -1,9 +1,10 @@
 import matplotlib
 matplotlib.use("Agg")
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional                          # ← NEW
+from typing import Optional
 from io import BytesIO
 import geopandas as gpd
 import os
@@ -103,19 +104,38 @@ class LocationRequest(BaseModel):
     data_type: str
     value:     str
     lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
-    lat:       Optional[float] = None   # None for LOT type — resolver handles it
-    # Scope (optional); each endpoint uses only what it needs
-    max_walk_minutes:    Optional[int] = None   # walking
-    max_drive_minutes:   Optional[int] = None   # driving
-    context_radius_m:    Optional[int] = None   # context
-    transport_radius_m:  Optional[int] = None   # transport
+    lat:       Optional[float] = None
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
     return StreamingResponse(buffer, media_type="image/png")
 
 # -----------------------------------------------------
-# GENERIC ANALYSIS WRAPPER
+# HELPER: normalise ADDRESS requests
+# -----------------------------------------------------
+
+def normalise_request(req: LocationRequest):
+    """
+    For ADDRESS type: data_type and value are converted so that
+    resolver.py can handle them via the lon/lat passthrough.
+    Returns (data_type, value, lon, lat).
+    """
+    data_type = req.data_type.upper()
+    value     = req.value
+    lon       = req.lon
+    lat       = req.lat
+
+    if data_type == "ADDRESS":
+        if lon is None or lat is None:
+            raise ValueError(
+                "ADDRESS type requires pre-resolved lon/lat. "
+                "Please select the site from search results."
+            )
+
+    return data_type, value, lon, lat
+
+# -----------------------------------------------------
+# GENERIC WRAPPER
 # -----------------------------------------------------
 
 def run_analysis(data_type: str, value: str, analysis_type: str, func, *args):
@@ -184,7 +204,7 @@ def search(q: str, limit: int = 100):
                 continue
             seen.add(key)
             results.append({
-                "lot_id":    lot_id,
+                "lot_id":    lot_id,        # e.g. "IL 1657" — sent as value to analysis
                 "name":      lot_id,
                 "address":   address,
                 "district":  attrs.get("City", ""),
@@ -219,9 +239,13 @@ def search(q: str, limit: int = 100):
                     )
                 except Exception:
                     lon, lat = None, None
+
+                # Use name_en as the display label; address_en as the value
+                display = name_en if name_en else address_en
+
                 results.append({
-                    "lot_id":    address_en,
-                    "name":      name_en,
+                    "lot_id":    display,       # used as "value" in analysis POST
+                    "name":      display,
                     "address":   address_en,
                     "district":  district,
                     "ref_id":    "",
@@ -242,12 +266,11 @@ def search(q: str, limit: int = 100):
 
 @app.post("/walking")
 def walking(req: LocationRequest):
-    minutes = req.max_walk_minutes if req.max_walk_minutes is not None else 5
-    analysis_type = f"walking_{minutes}"
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, analysis_type,
-            generate_walking, req.data_type, req.value, minutes
+            data_type, value, "walking",
+            generate_walking, data_type, value, 15, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -256,12 +279,11 @@ def walking(req: LocationRequest):
 
 @app.post("/driving")
 def driving(req: LocationRequest):
-    minutes = req.max_drive_minutes if req.max_drive_minutes is not None else 15
-    analysis_type = f"driving_{minutes}"
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, analysis_type,
-            generate_driving, req.data_type, req.value, ZONE_DATA, minutes
+            data_type, value, "driving",
+            generate_driving, data_type, value, ZONE_DATA, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -270,12 +292,11 @@ def driving(req: LocationRequest):
 
 @app.post("/transport")
 def transport(req: LocationRequest):
-    radius = req.transport_radius_m
-    analysis_type = f"transport_{radius}" if radius is not None else "transport"
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, analysis_type,
-            generate_transport, req.data_type, req.value, radius
+            data_type, value, "transport",
+            generate_transport, data_type, value, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -284,12 +305,11 @@ def transport(req: LocationRequest):
 
 @app.post("/context")
 def context(req: LocationRequest):
-    radius = req.context_radius_m
-    analysis_type = f"context_{radius}" if radius is not None else "context"
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, analysis_type,
-            generate_context, req.data_type, req.value, ZONE_DATA, radius
+            data_type, value, "context",
+            generate_context, data_type, value, ZONE_DATA, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -299,9 +319,10 @@ def context(req: LocationRequest):
 @app.post("/view")
 def view(req: LocationRequest):
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, "view",
-            generate_view, req.data_type, req.value, BUILDING_DATA
+            data_type, value, "view",
+            generate_view, data_type, value, BUILDING_DATA, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -311,9 +332,10 @@ def view(req: LocationRequest):
 @app.post("/noise")
 def noise(req: LocationRequest):
     try:
+        data_type, value, lon, lat = normalise_request(req)
         img = run_analysis(
-            req.data_type, req.value, "noise",
-            generate_noise, req.data_type, req.value
+            data_type, value, "noise",
+            generate_noise, data_type, value, lon, lat
         )
         return image_response(img)
     except Exception as e:
@@ -323,7 +345,9 @@ def noise(req: LocationRequest):
 # PDF REPORT
 # -----------------------------------------------------
 
-def generate_pdf_report(data_type: str, value: str):
+def generate_pdf_report(data_type: str, value: str,
+                         lon: Optional[float] = None,
+                         lat: Optional[float] = None):
 
     buffer = BytesIO()
     landscape_a4 = (A4[1], A4[0])
@@ -341,15 +365,6 @@ def generate_pdf_report(data_type: str, value: str):
         spaceAfter=4,
         alignment=1,
     )
-    footer_style = ParagraphStyle(
-        name="Footer",
-        parent=styles["Normal"],
-        fontSize=9,
-        textColor="gray",
-        alignment=1,
-        spaceBefore=1,
-    )
-
     _title_line_pt  = title_style.fontSize * 1.2
     _title_block_pt = 2 * _title_line_pt + title_style.spaceAfter
     _spacer_pt      = 0.25 * inch
@@ -369,13 +384,13 @@ def generate_pdf_report(data_type: str, value: str):
 
     logging.info("Generating report images...")
 
-    walking_5     = generate_walking(data_type, value, 5)
-    walking_15    = generate_walking(data_type, value, 15)
-    driving_img   = generate_driving(data_type, value, ZONE_DATA)
-    transport_img = generate_transport(data_type, value)
-    context_img   = generate_context(data_type, value, ZONE_DATA)
-    view_img      = generate_view(data_type, value, BUILDING_DATA)
-    noise_img     = generate_noise(data_type, value)
+    walking_5     = generate_walking(data_type, value, 5,  lon, lat)
+    walking_15    = generate_walking(data_type, value, 15, lon, lat)
+    driving_img   = generate_driving(data_type, value, ZONE_DATA, lon, lat)
+    transport_img = generate_transport(data_type, value, lon, lat)
+    context_img   = generate_context(data_type, value, ZONE_DATA, lon, lat)
+    view_img      = generate_view(data_type, value, BUILDING_DATA, lon, lat)
+    noise_img     = generate_noise(data_type, value, lon, lat)
 
     images = [
         walking_5, walking_15, driving_img, transport_img,
@@ -424,8 +439,9 @@ def generate_pdf_report(data_type: str, value: str):
 @app.post("/report")
 def report(req: LocationRequest):
     try:
-        logging.info(f"Generating FULL PDF report for {req.data_type} {req.value}")
-        pdf_buffer = generate_pdf_report(req.data_type, req.value)
+        data_type, value, lon, lat = normalise_request(req)
+        logging.info(f"Generating FULL PDF report for {data_type} {value}")
+        pdf_buffer = generate_pdf_report(data_type, value, lon, lat)
         return StreamingResponse(
             pdf_buffer,
             media_type="application/pdf",
