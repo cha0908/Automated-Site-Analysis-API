@@ -105,6 +105,8 @@ class LocationRequest(BaseModel):
     value:     str
     lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
     lat:       Optional[float] = None
+    lot_ids:   Optional[list]  = None   # multi-lot: list of lot_id strings
+    extents:   Optional[list]  = None   # multi-lot: list of {xmin,ymin,xmax,ymax} in HK2326
 
 def image_response(buffer: BytesIO):
     buffer.seek(0)
@@ -116,14 +118,16 @@ def image_response(buffer: BytesIO):
 
 def normalise_request(req: LocationRequest):
     """
-    For ADDRESS type: data_type and value are converted so that
-    resolver.py can handle them via the lon/lat passthrough.
-    Returns (data_type, value, lon, lat).
+    Returns (data_type, value, lon, lat, lot_ids, extents).
+    For ADDRESS: requires pre-resolved lon/lat.
+    For multi-lot LOT: lot_ids and extents carry extra boundary info.
     """
     data_type = req.data_type.upper()
     value     = req.value
     lon       = req.lon
     lat       = req.lat
+    lot_ids   = req.lot_ids or []
+    extents   = req.extents or []
 
     if data_type == "ADDRESS":
         if lon is None or lat is None:
@@ -132,7 +136,7 @@ def normalise_request(req: LocationRequest):
                 "Please select the site from search results."
             )
 
-    return data_type, value, lon, lat
+    return data_type, value, lon, lat, lot_ids, extents
 
 # -----------------------------------------------------
 # GENERIC WRAPPER
@@ -199,20 +203,46 @@ def search(q: str, limit: int = 100):
             lot_id  = attrs.get("Descr", c.get("address", q)).strip()
             ref_id  = attrs.get("Ref_ID", "")
             address = c.get("address", "").strip()
+            score   = c.get("score", 0)
             key     = f"LOT_{ref_id or lot_id}"
             if key in seen:
                 continue
             seen.add(key)
+
+            # Real HK2326 location + extent from API
+            loc    = c.get("location", {})
+            extent = c.get("extent", {})
+            x2326  = loc.get("x") or attrs.get("X")
+            y2326  = loc.get("y") or attrs.get("Y")
+
+            lon_wgs, lat_wgs = None, None
+            if x2326 and y2326:
+                try:
+                    lon_wgs, lat_wgs = _transformer_2326_to_4326.transform(x2326, y2326)
+                    lon_wgs = round(lon_wgs, 6)
+                    lat_wgs = round(lat_wgs, 6)
+                except Exception:
+                    pass
+
             results.append({
-                "lot_id":    lot_id,        # e.g. "IL 1657" — sent as value to analysis
+                "lot_id":    lot_id,
                 "name":      lot_id,
                 "address":   address,
                 "district":  attrs.get("City", ""),
                 "ref_id":    ref_id,
+                "score":     score,
                 "data_type": "LOT",
                 "source":    "lot_search",
-                "lon":       None,
-                "lat":       None,
+                "lon":       lon_wgs,
+                "lat":       lat_wgs,
+                "x2326":     round(x2326, 2) if x2326 else None,
+                "y2326":     round(y2326, 2) if y2326 else None,
+                "extent": {
+                    "xmin": extent.get("xmin") or attrs.get("Xmin"),
+                    "ymin": extent.get("ymin") or attrs.get("Ymin"),
+                    "xmax": extent.get("xmax") or attrs.get("Xmax"),
+                    "ymax": extent.get("ymax") or attrs.get("Ymax"),
+                } if (extent or attrs.get("Xmin")) else None,
             })
     except Exception as e:
         logging.warning(f"/search lot lookup failed: {e}")
@@ -267,10 +297,10 @@ def search(q: str, limit: int = 100):
 @app.post("/walking")
 def walking(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "walking",
-            generate_walking, data_type, value, 15, lon, lat
+            generate_walking, data_type, value, 15, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -280,10 +310,10 @@ def walking(req: LocationRequest):
 @app.post("/driving")
 def driving(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "driving",
-            generate_driving, data_type, value, ZONE_DATA, lon, lat
+            generate_driving, data_type, value, ZONE_DATA, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -293,10 +323,10 @@ def driving(req: LocationRequest):
 @app.post("/transport")
 def transport(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "transport",
-            generate_transport, data_type, value, lon, lat
+            generate_transport, data_type, value, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -306,10 +336,10 @@ def transport(req: LocationRequest):
 @app.post("/context")
 def context(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "context",
-            generate_context, data_type, value, ZONE_DATA, lon, lat
+            generate_context, data_type, value, ZONE_DATA, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -319,10 +349,10 @@ def context(req: LocationRequest):
 @app.post("/view")
 def view(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "view",
-            generate_view, data_type, value, BUILDING_DATA, lon, lat
+            generate_view, data_type, value, BUILDING_DATA, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -332,10 +362,10 @@ def view(req: LocationRequest):
 @app.post("/noise")
 def noise(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         img = run_analysis(
             data_type, value, "noise",
-            generate_noise, data_type, value, lon, lat
+            generate_noise, data_type, value, lon, lat, lot_ids, extents
         )
         return image_response(img)
     except Exception as e:
@@ -439,7 +469,7 @@ def generate_pdf_report(data_type: str, value: str,
 @app.post("/report")
 def report(req: LocationRequest):
     try:
-        data_type, value, lon, lat = normalise_request(req)
+        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
         logging.info(f"Generating FULL PDF report for {data_type} {value}")
         pdf_buffer = generate_pdf_report(data_type, value, lon, lat)
         return StreamingResponse(
