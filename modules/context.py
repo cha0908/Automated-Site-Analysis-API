@@ -50,13 +50,9 @@ def context_rules(site_type):
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, radius_m:Optional[int] = None):
-
-    # --------------------------------------------------------
-    # RESOLVE LOCATION
-    # --------------------------------------------------------
-
-    lon, lat = resolve_location(data_type, value)
+def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, radius_m:Optional[int] = None,
+                    lon: float = None, lat: float = None):
+    lon, lat = resolve_location(data_type, value, lon, lat)
     fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
     half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
 
