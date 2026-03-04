@@ -4,7 +4,7 @@ matplotlib.use("Agg")
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from io import BytesIO
 import geopandas as gpd
 import os
@@ -20,10 +20,6 @@ from reportlab.lib import utils
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from fastapi.middleware.cors import CORSMiddleware
 
-# -----------------------------------------------------
-# IMPORT MODULES
-# -----------------------------------------------------
-
 from modules.walking import generate_walking
 from modules.driving import generate_driving
 from modules.transport import generate_transport
@@ -31,18 +27,8 @@ from modules.context import generate_context
 from modules.view import generate_view
 from modules.noise import generate_noise
 
-# -----------------------------------------------------
-# FASTAPI INIT
-# -----------------------------------------------------
-
-app = FastAPI(
-    title="Automated Site Analysis API",
-    version="3.0"
-)
-
-# -----------------------------------------------------
-# CORS CONFIGURATION
-# -----------------------------------------------------
+# ── App ───────────────────────────────────────────────────────
+app = FastAPI(title="Automated Site Analysis API", version="3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,237 +38,149 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------------------------------
-# LOGGING CONFIG
-# -----------------------------------------------------
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 
-# -----------------------------------------------------
-# CACHE STORE
-# -----------------------------------------------------
-
+# ── Cache ─────────────────────────────────────────────────────
 CACHE_STORE = {}
 
 def cache_key(data_type: str, value: str, analysis_type: str):
-    raw = f"{data_type}_{value}_{analysis_type}"
-    return hashlib.md5(raw.encode()).hexdigest()
+    return hashlib.md5(f"{data_type}_{value}_{analysis_type}".encode()).hexdigest()
 
-# -----------------------------------------------------
-# LOAD STATIC DATA
-# -----------------------------------------------------
-
+# ── Static data ───────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 
-ZONE_PATH      = os.path.join(DATA_DIR, "ZONE_REDUCED.gpkg")
-BUILDINGS_PATH = os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")
-
 print("Loading zoning dataset...")
-ZONE_DATA = gpd.read_file(ZONE_PATH).to_crs(3857)
+ZONE_DATA = gpd.read_file(os.path.join(DATA_DIR, "ZONE_REDUCED.gpkg")).to_crs(3857)
 
 print("Loading building height dataset...")
-BUILDING_DATA = gpd.read_file(BUILDINGS_PATH).to_crs(3857)
-
+BUILDING_DATA = gpd.read_file(os.path.join(DATA_DIR, "BUILDINGS_FINAL .gpkg")).to_crs(3857)
 if "HEIGHT_M" not in BUILDING_DATA.columns:
-    raise ValueError(
-        f"HEIGHT_M column not found. Available columns: {BUILDING_DATA.columns}"
-    )
-
+    raise ValueError(f"HEIGHT_M column not found. Available: {BUILDING_DATA.columns}")
 BUILDING_DATA = BUILDING_DATA[BUILDING_DATA["HEIGHT_M"] > 5]
 
 print("Startup complete.")
 
-# -----------------------------------------------------
-# REQUEST MODELS
-# -----------------------------------------------------
-
+# ── Request model ─────────────────────────────────────────────
 class LocationRequest(BaseModel):
     data_type: str
     value:     str
-    lon:       Optional[float] = None   # pre-resolved coords for ADDRESS type
-    lat:       Optional[float] = None
-    lot_ids:   Optional[list]  = None   # multi-lot: list of lot_id strings
-    extents:   Optional[list]  = None   # multi-lot: list of {xmin,ymin,xmax,ymax} in HK2326
+    lon:       Optional[float]      = None   # pre-resolved WGS84 lon
+    lat:       Optional[float]      = None   # pre-resolved WGS84 lat
+    lot_ids:   Optional[List[str]]  = None   # multi-lot: lot_id strings
+    extents:   Optional[List[dict]] = None   # multi-lot: {xmin,ymin,xmax,ymax} HK2326
 
-def image_response(buffer: BytesIO):
-    buffer.seek(0)
-    return StreamingResponse(buffer, media_type="image/png")
-
-# -----------------------------------------------------
-# HELPER: normalise ADDRESS requests
-# -----------------------------------------------------
+def image_response(buf: BytesIO):
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png")
 
 def normalise_request(req: LocationRequest):
-    """
-    Returns (data_type, value, lon, lat, lot_ids, extents).
-    For ADDRESS: requires pre-resolved lon/lat.
-    For multi-lot LOT: lot_ids and extents carry extra boundary info.
-    """
-    data_type = req.data_type.upper()
-    value     = req.value
-    lon       = req.lon
-    lat       = req.lat
-    lot_ids   = req.lot_ids or []
-    extents   = req.extents or []
+    dt      = req.data_type.upper()
+    lot_ids = req.lot_ids or []
+    extents = req.extents or []
+    if dt == "ADDRESS" and (req.lon is None or req.lat is None):
+        raise ValueError("ADDRESS type requires pre-resolved lon/lat from search results.")
+    return dt, req.value, req.lon, req.lat, lot_ids, extents
 
-    if data_type == "ADDRESS":
-        if lon is None or lat is None:
-            raise ValueError(
-                "ADDRESS type requires pre-resolved lon/lat. "
-                "Please select the site from search results."
-            )
-
-    return data_type, value, lon, lat, lot_ids, extents
-
-# -----------------------------------------------------
-# GENERIC WRAPPER
-# -----------------------------------------------------
-
-def run_analysis(data_type: str, value: str, analysis_type: str, func, *args):
-
+# ── Generic wrapper ───────────────────────────────────────────
+def run_analysis(data_type, value, analysis_type, func, *args):
     logging.info(f"Incoming {analysis_type.upper()} request for {data_type} {value}")
     start = time.time()
-
     key = cache_key(data_type, value, analysis_type)
-
     if key in CACHE_STORE:
         logging.info(f"{analysis_type.upper()} cache hit for {data_type} {value}")
         return CACHE_STORE[key]
-
     result = func(*args)
-
     CACHE_STORE[key] = result
-
-    duration = round(time.time() - start, 2)
-    logging.info(f"{analysis_type.upper()} completed in {duration}s")
-
+    logging.info(f"{analysis_type.upper()} completed in {round(time.time()-start,2)}s")
     return result
 
-# -----------------------------------------------------
-# SEARCH HELPERS
-# -----------------------------------------------------
-
-_transformer_2326_to_4326 = Transformer.from_crs(2326, 4326, always_xy=True)
-
+# ── Search helpers ────────────────────────────────────────────
+_t2326_4326 = Transformer.from_crs(2326, 4326, always_xy=True)
 LOT_PREFIXES = (
-    "IL", "NKIL", "KIL", "STTL", "STL", "TML", "TPTL",
-    "DD", "RBL", "KCTL", "ML", "GLA", "LPP"
+    "IL","NKIL","KIL","STTL","STL","TML","TPTL",
+    "DD","RBL","KCTL","ML","GLA","LPP"
 )
 
-def _looks_like_lot_id(q: str) -> bool:
-    q_upper = q.upper().strip()
-    return any(q_upper.startswith(p) for p in LOT_PREFIXES)
+def _looks_like_lot_id(q):
+    return any(q.upper().strip().startswith(p) for p in LOT_PREFIXES)
 
-# -----------------------------------------------------
-# SEARCH ENDPOINT
-# -----------------------------------------------------
-
+# ── /search ───────────────────────────────────────────────────
 @app.get("/search")
 def search(q: str, limit: int = 100):
     q = q.strip()
     if not q:
         return {"count": 0, "results": []}
 
-    results = []
-    seen    = set()
-    is_lot  = _looks_like_lot_id(q)
+    results, seen = [], set()
+    is_lot = _looks_like_lot_id(q)
 
-    # ── 1. LOT ID SEARCH ──────────────────────────────────────
+    # LOT search
     try:
         resp = requests.get(
             "https://mapapi.geodata.gov.hk/gs/api/v1.0.0/lus/lot/SearchNumber"
-            f"?text={requests.utils.quote(q)}",
-            timeout=10
-        )
+            f"?text={requests.utils.quote(q)}", timeout=10)
         for c in resp.json().get("candidates", [])[:limit]:
-            attrs   = c.get("attributes", {})
-            lot_id  = attrs.get("Descr", c.get("address", q)).strip()
-            ref_id  = attrs.get("Ref_ID", "")
-            address = c.get("address", "").strip()
-            score   = c.get("score", 0)
-            key     = f"LOT_{ref_id or lot_id}"
-            if key in seen:
-                continue
+            attrs  = c.get("attributes", {})
+            lot_id = attrs.get("Descr", c.get("address", q)).strip()
+            ref_id = attrs.get("Ref_ID", "")
+            key    = f"LOT_{ref_id or lot_id}"
+            if key in seen: continue
             seen.add(key)
-
-            # Real HK2326 location + extent from API
-            loc    = c.get("location", {})
-            extent = c.get("extent", {})
-            x2326  = loc.get("x") or attrs.get("X")
-            y2326  = loc.get("y") or attrs.get("Y")
-
-            lon_wgs, lat_wgs = None, None
-            if x2326 and y2326:
+            loc = c.get("location", {}); ext = c.get("extent", {})
+            x, y = loc.get("x") or attrs.get("X"), loc.get("y") or attrs.get("Y")
+            lon_w = lat_w = None
+            if x and y:
                 try:
-                    lon_wgs, lat_wgs = _transformer_2326_to_4326.transform(x2326, y2326)
-                    lon_wgs = round(lon_wgs, 6)
-                    lat_wgs = round(lat_wgs, 6)
-                except Exception:
-                    pass
-
+                    lon_w, lat_w = _t2326_4326.transform(x, y)
+                    lon_w, lat_w = round(lon_w, 6), round(lat_w, 6)
+                except Exception: pass
             results.append({
-                "lot_id":    lot_id,
-                "name":      lot_id,
-                "address":   address,
-                "district":  attrs.get("City", ""),
-                "ref_id":    ref_id,
-                "score":     score,
-                "data_type": "LOT",
-                "source":    "lot_search",
-                "lon":       lon_wgs,
-                "lat":       lat_wgs,
-                "x2326":     round(x2326, 2) if x2326 else None,
-                "y2326":     round(y2326, 2) if y2326 else None,
+                "lot_id": lot_id, "name": lot_id,
+                "address": c.get("address","").strip(),
+                "district": attrs.get("City",""),
+                "ref_id": ref_id, "score": c.get("score",0),
+                "data_type": "LOT", "source": "lot_search",
+                "lon": lon_w, "lat": lat_w,
+                "x2326": round(x,2) if x else None,
+                "y2326": round(y,2) if y else None,
                 "extent": {
-                    "xmin": extent.get("xmin") or attrs.get("Xmin"),
-                    "ymin": extent.get("ymin") or attrs.get("Ymin"),
-                    "xmax": extent.get("xmax") or attrs.get("Xmax"),
-                    "ymax": extent.get("ymax") or attrs.get("Ymax"),
-                } if (extent or attrs.get("Xmin")) else None,
+                    "xmin": ext.get("xmin") or attrs.get("Xmin"),
+                    "ymin": ext.get("ymin") or attrs.get("Ymin"),
+                    "xmax": ext.get("xmax") or attrs.get("Xmax"),
+                    "ymax": ext.get("ymax") or attrs.get("Ymax"),
+                } if (ext or attrs.get("Xmin")) else None,
             })
     except Exception as e:
         logging.warning(f"/search lot lookup failed: {e}")
 
-    # ── 2. ADDRESS / BUILDING NAME SEARCH ─────────────────────
+    # Address search
     if not is_lot:
         try:
             resp = requests.get(
-                "https://geodata.gov.hk/gs/api/v1.0.0/locationSearch"
-                f"?q={requests.utils.quote(q)}",
-                timeout=10
-            )
+                f"https://geodata.gov.hk/gs/api/v1.0.0/locationSearch?q={requests.utils.quote(q)}",
+                timeout=10)
             for s in resp.json()[:limit]:
-                name_en    = str(s.get("nameEN",    "")).strip()
-                address_en = str(s.get("addressEN", "")).strip()
-                district   = str(s.get("districtEN","")).strip()
-                key        = f"ADDR_{address_en}_{name_en}"
-                if key in seen:
-                    continue
+                ne = str(s.get("nameEN","")).strip()
+                ae = str(s.get("addressEN","")).strip()
+                key = f"ADDR_{ae}_{ne}"
+                if key in seen: continue
                 seen.add(key)
                 try:
-                    lon, lat = _transformer_2326_to_4326.transform(
-                        s.get("x"), s.get("y")
-                    )
+                    lon_r, lat_r = _t2326_4326.transform(s.get("x"), s.get("y"))
                 except Exception:
-                    lon, lat = None, None
-
-                # Use name_en as the display label; address_en as the value
-                display = name_en if name_en else address_en
-
+                    lon_r = lat_r = None
+                display = ne if ne else ae
                 results.append({
-                    "lot_id":    display,       # used as "value" in analysis POST
-                    "name":      display,
-                    "address":   address_en,
-                    "district":  district,
-                    "ref_id":    "",
-                    "data_type": "ADDRESS",
-                    "source":    "address_search",
-                    "lon":       round(lon, 6) if lon else None,
-                    "lat":       round(lat, 6) if lat else None,
+                    "lot_id": display, "name": display, "address": ae,
+                    "district": str(s.get("districtEN","")).strip(),
+                    "ref_id": "", "data_type": "ADDRESS", "source": "address_search",
+                    "lon": round(lon_r,6) if lon_r else None,
+                    "lat": round(lat_r,6) if lat_r else None,
+                    "extent": None,
                 })
         except Exception as e:
             logging.warning(f"/search address lookup failed: {e}")
@@ -290,175 +188,163 @@ def search(q: str, limit: int = 100):
     logging.info(f"Search '{q}' → {len(results)} results")
     return {"count": len(results), "results": results}
 
-# -----------------------------------------------------
-# ANALYSIS ENDPOINTS
-# -----------------------------------------------------
 
-@app.post("/walking")
-def walking(req: LocationRequest):
+# ── /lot-boundary ─────────────────────────────────────────────
+# Called by the frontend Leaflet map to draw the polygon in the
+# "Your Site Preview" panel. Returns merged GeoJSON in WGS84.
+# Single: GET /lot-boundary?lon=114.15&lat=22.28&data_type=LOT
+# Multi:  GET /lot-boundary?lon=...&lat=...&extents=[{...},{...}]
+@app.get("/lot-boundary")
+def lot_boundary(
+    lon: float,
+    lat: float,
+    data_type: str = "LOT",
+    extents: Optional[str] = None,   # JSON-encoded list of extent dicts
+):
+    import json
+    from modules.resolver import get_lot_boundary
+
+    ext_list = []
+    if extents:
+        try:
+            ext_list = json.loads(extents)
+        except Exception:
+            pass
+
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "walking",
-            generate_walking, data_type, value, 15, lon, lat, lot_ids, extents
-        )
-        return image_response(img)
+        gdf = get_lot_boundary(lon, lat, data_type, ext_list if ext_list else None)
+        if gdf is None or gdf.empty:
+            raise HTTPException(status_code=404, detail="Lot boundary not found")
+        return gdf.to_crs(4326).__geo_interface__
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── Analysis endpoints ────────────────────────────────────────
+@app.post("/walking")
+def walking(req: LocationRequest):
+    try:
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "walking",
+            generate_walking, dt, v, 15, lon, lat, lot_ids, extents)
+        return image_response(img)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/driving")
 def driving(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "driving",
-            generate_driving, data_type, value, ZONE_DATA, lon, lat, lot_ids, extents
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "driving",
+            generate_driving, dt, v, ZONE_DATA, lon, lat, lot_ids, extents)
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/transport")
 def transport(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "transport",
-            generate_transport, data_type, value, lon, lat, lot_ids, extents
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "transport",
+            generate_transport, dt, v, lon, lat, lot_ids, extents)
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/context")
 def context(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "context",
-            generate_context, data_type, value, ZONE_DATA, lon, lat, lot_ids, extents
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "context",
+            generate_context, dt, v, ZONE_DATA, lon, lat, lot_ids, extents)
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/view")
 def view(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "view",
-            generate_view, data_type, value, BUILDING_DATA, lon, lat, lot_ids, extents
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "view",
+            generate_view, dt, v, BUILDING_DATA, lon, lat, lot_ids, extents)
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 @app.post("/noise")
 def noise(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        img = run_analysis(
-            data_type, value, "noise",
-            generate_noise, data_type, value, lon, lat, lot_ids, extents
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        img = run_analysis(dt, v, "noise",
+            generate_noise, dt, v, lon, lat, lot_ids, extents)
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# -----------------------------------------------------
-# PDF REPORT
-# -----------------------------------------------------
 
+# ── PDF report ────────────────────────────────────────────────
 def generate_pdf_report(data_type: str, value: str,
-                         lon: Optional[float] = None,
-                         lat: Optional[float] = None):
+                         lon: float = None, lat: float = None,
+                         lot_ids: list = None, extents: list = None):
+    lot_ids = lot_ids or []
+    extents = extents or []
 
     buffer = BytesIO()
     landscape_a4 = (A4[1], A4[0])
-    page_w_pt, page_h_pt = A4[1], A4[0]
-    margin_pt  = 0.3 * inch
-    frame_w_pt = page_w_pt - 2 * margin_pt
-    frame_h_pt = page_h_pt - 2 * margin_pt
+    margin_pt    = 0.3 * inch
+    frame_w_pt   = A4[1] - 2 * margin_pt
+    frame_h_pt   = A4[0] - 2 * margin_pt
 
-    elements = []
-    styles   = getSampleStyleSheet()
+    styles = getSampleStyleSheet()
     title_style = ParagraphStyle(
-        name="SlideTitle",
-        parent=styles["Heading1"],
-        fontSize=18,
-        spaceAfter=4,
-        alignment=1,
-    )
-    _title_line_pt  = title_style.fontSize * 1.2
-    _title_block_pt = 2 * _title_line_pt + title_style.spaceAfter
-    _spacer_pt      = 0.25 * inch
-    reserved_h_pt   = _title_block_pt + _spacer_pt
+        name="SlideTitle", parent=styles["Heading1"],
+        fontSize=18, spaceAfter=4, alignment=1)
 
+    reserved_h_pt  = (title_style.fontSize*1.2*2 + title_style.spaceAfter) + 0.25*inch
     max_image_w_pt = frame_w_pt
     max_image_h_pt = frame_h_pt - reserved_h_pt
 
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=landscape_a4,
-        leftMargin=margin_pt,
-        rightMargin=margin_pt,
-        topMargin=margin_pt,
-        bottomMargin=margin_pt,
-    )
+    doc = SimpleDocTemplate(buffer, pagesize=landscape_a4,
+        leftMargin=margin_pt, rightMargin=margin_pt,
+        topMargin=margin_pt,  bottomMargin=margin_pt)
 
     logging.info("Generating report images...")
 
-    walking_5     = generate_walking(data_type, value, 5,  lon, lat)
-    walking_15    = generate_walking(data_type, value, 15, lon, lat)
-    driving_img   = generate_driving(data_type, value, ZONE_DATA, lon, lat)
-    transport_img = generate_transport(data_type, value, lon, lat)
-    context_img   = generate_context(data_type, value, ZONE_DATA, lon, lat)
-    view_img      = generate_view(data_type, value, BUILDING_DATA, lon, lat)
-    noise_img     = generate_noise(data_type, value, lon, lat)
-
-    images = [
-        walking_5, walking_15, driving_img, transport_img,
-        context_img, view_img, noise_img,
+    # All module calls pass the full lot_ids + extents
+    imgs = [
+        generate_walking(data_type, value, 5,  lon, lat, lot_ids, extents),
+        generate_walking(data_type, value, 15, lon, lat, lot_ids, extents),
+        generate_driving(data_type, value, ZONE_DATA,   lon, lat, lot_ids, extents),
+        generate_transport(data_type, value,            lon, lat, lot_ids, extents),
+        generate_context(data_type, value, ZONE_DATA,   lon, lat, lot_ids, extents),
+        generate_view(data_type, value, BUILDING_DATA,  lon, lat, lot_ids, extents),
+        generate_noise(data_type, value,                lon, lat, lot_ids, extents),
+    ]
+    titles = [
+        "Walking Accessibility (5 min)", "Walking Accessibility (15 min)",
+        "Driving Distance", "Transport Network",
+        "Context & Zoning", "View Analysis", "Noise Assessment",
     ]
 
-    site_label = f"{data_type} {value}"
-    elements.append(Spacer(1, 3 * inch))
+    elements = []
+    elements.append(Spacer(1, 3*inch))
     elements.append(Paragraph("Site Analysis Report", title_style))
-    elements.append(Spacer(1, 0.3 * inch))
-    elements.append(Paragraph(site_label, styles["Heading2"]))
+    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Paragraph(f"{data_type} {value}", styles["Heading2"]))
     elements.append(PageBreak())
 
-    titles = [
-        "Walking Accessibility (5 min)",
-        "Walking Accessibility (15 min)",
-        "Driving Distance",
-        "Transport Network",
-        "Context & Zoning",
-        "View Analysis",
-        "Noise Assessment",
-    ]
-
-    n_pages = len(titles)
-
-    for i, (slide_title, img_buffer) in enumerate(zip(titles, images), start=1):
-        elements.append(Paragraph(slide_title, title_style))
-        elements.append(Spacer(1, 0.25 * inch))
-        img_buffer.seek(0)
-        data     = img_buffer.read()
-        copy_buf = BytesIO(data)
-        reader   = utils.ImageReader(copy_buf)
-        iw, ih   = reader.getSize()
-        scale    = min(max_image_w_pt / iw, max_image_h_pt / ih)
-        w        = iw * scale
-        h        = ih * scale
-        elements.append(RLImage(BytesIO(data), width=w, height=h))
-        if i < n_pages:
+    for i, (title, buf) in enumerate(zip(titles, imgs), 1):
+        elements.append(Paragraph(title, title_style))
+        elements.append(Spacer(1, 0.25*inch))
+        buf.seek(0)
+        data   = buf.read()
+        reader = utils.ImageReader(BytesIO(data))
+        iw, ih = reader.getSize()
+        scale  = min(max_image_w_pt/iw, max_image_h_pt/ih)
+        elements.append(RLImage(BytesIO(data), width=iw*scale, height=ih*scale))
+        if i < len(titles):
             elements.append(PageBreak())
 
     doc.build(elements)
@@ -469,23 +355,16 @@ def generate_pdf_report(data_type: str, value: str,
 @app.post("/report")
 def report(req: LocationRequest):
     try:
-        data_type, value, lon, lat, lot_ids, extents = normalise_request(req)
-        logging.info(f"Generating FULL PDF report for {data_type} {value}")
-        pdf_buffer = generate_pdf_report(data_type, value, lon, lat)
-        return StreamingResponse(
-            pdf_buffer,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": "attachment; filename=site_analysis_report.pdf"
-            }
-        )
+        dt, v, lon, lat, lot_ids, extents = normalise_request(req)
+        logging.info(f"Generating FULL PDF report for {dt} {v}")
+        pdf = generate_pdf_report(dt, v, lon, lat, lot_ids, extents)
+        return StreamingResponse(pdf, media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=site_analysis_report.pdf"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# -----------------------------------------------------
-# HEALTH CHECK
-# -----------------------------------------------------
 
+# ── Health check ──────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "Automated Site Analysis API Running - Multi Identifier Enabled"}
+    return {"status": "Automated Site Analysis API v3.1 — Multi-lot enabled"}
