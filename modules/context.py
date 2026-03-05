@@ -5,7 +5,7 @@ import contextily as cx
 import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
-from typing import Optional
+from typing import Optional, List
 from shapely.geometry import Point
 from sklearn.cluster import KMeans
 from io import BytesIO
