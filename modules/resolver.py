@@ -7,26 +7,34 @@ import geopandas as gpd
 from shapely.geometry import Point, box
 from shapely.ops import unary_union
 
-BASE_URL = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
-LOT_INDEX_BBOX_M = 300
+BASE_URL         = "https://mapapi.geodata.gov.hk/gs/api/v1.0.0"
+LOT_INDEX_BBOX_M = 300   # half-side metres for single-lot centroid search
 
 ALLOWED_TYPES = [
     "LOT", "STT", "GLA", "LPP", "UN",
     "BUILDINGCSUID", "LOTCSUID", "PRN", "ADDRESS",
 ]
 
-_LOT_INDEX_TYPE = {"GLA": "gla", "STT": "stt"}
-_LOT_BOUNDARY_CACHE = {}
-_transformer_2326_to_4326 = Transformer.from_crs(2326, 4326, always_xy=True)
-_transformer_4326_to_2326 = Transformer.from_crs(4326, 2326, always_xy=True)
+_LOT_INDEX_TYPE      = {"GLA": "gla", "STT": "stt"}
+_LOT_BOUNDARY_CACHE  = {}
+_t2326_4326 = Transformer.from_crs(2326, 4326, always_xy=True)
+_t4326_2326 = Transformer.from_crs(4326, 2326, always_xy=True)
+log = logging.getLogger(__name__)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERNAL: fetch + parse GML from LandsD iC1000 API
+# ─────────────────────────────────────────────────────────────────────────────
 def _fetch_lot_gml(lit, minx, miny, maxx, maxy):
-    """Fetch lot boundary GML from HK Gov GIS API."""
     url = f"{BASE_URL}/iC1000/{lit}?bbox={minx},{miny},{maxx},{maxy},EPSG:2326"
-    resp = requests.get(url, timeout=15)
-    if resp.status_code != 200 or not resp.content.strip():
+    try:
+        resp = requests.get(url, timeout=15)
+        if resp.status_code != 200 or not resp.content.strip():
+            return None
+    except Exception as e:
+        log.debug("GML fetch error: %s", e)
         return None
+
     tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".gml", delete=False) as tmp:
@@ -38,7 +46,7 @@ def _fetch_lot_gml(lit, minx, miny, maxx, maxy):
             gdf = gdf.set_crs(2326)
         return gdf.to_crs(4326)
     except Exception as e:
-        logging.getLogger(__name__).debug("GML parse failed: %s", e)
+        log.debug("GML parse failed: %s", e)
         return None
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -48,53 +56,58 @@ def _fetch_lot_gml(lit, minx, miny, maxx, maxy):
                 pass
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC: get_lot_boundary
+#
+# Single lot  → centroid-based search → returns 1-row GDF in EPSG:3857
+# Multi-lot   → per-extent fetch → merge into ONE unified polygon → returns
+#               1-row GDF in EPSG:3857 (no individual lot highlighting)
+# ADDRESS     → returns None (site polygon determined by OSM building lookup)
+# ─────────────────────────────────────────────────────────────────────────────
 def get_lot_boundary(lon: float, lat: float, data_type: str,
                      extents: list = None):
-    """
-    Fetch lot boundary polygon(s).
-
-    If extents is provided (multi-lot), fetches each lot boundary using
-    its exact HK2326 bbox and merges adjacent ones into a single polygon.
-    Falls back to single-lot centroid search when extents is empty.
-    """
     data_type = data_type.upper()
+
     if data_type == "ADDRESS":
         return None
 
-    # ── MULTI-LOT: merge boundaries from real extents ─────────
+    # ── MULTI-LOT: one extent per selected lot ────────────────
     if extents and len(extents) > 1:
         merged_geoms = []
         lit = _LOT_INDEX_TYPE.get(data_type, "lot")
+
         for ext in extents:
             if not ext:
                 continue
             try:
                 xmin = float(ext["xmin"]); ymin = float(ext["ymin"])
                 xmax = float(ext["xmax"]); ymax = float(ext["ymax"])
-                # Expand search slightly to ensure we capture the lot
-                pad = 5
-                gdf = _fetch_lot_gml(lit, xmin - pad, ymin - pad, xmax + pad, ymax + pad)
+                pad  = 5  # small padding to catch boundary polygons
+                gdf  = _fetch_lot_gml(lit, xmin-pad, ymin-pad, xmax+pad, ymax+pad)
+
                 if gdf is None or gdf.empty:
-                    # Fallback: create bbox polygon from extent
-                    bbox_2326 = box(xmin, ymin, xmax, ymax)
-                    bbox_gdf  = gpd.GeoDataFrame(geometry=[bbox_2326], crs=2326).to_crs(4326)
+                    # Fallback: use extent bbox converted to WGS84
+                    bbox_gdf = gpd.GeoDataFrame(
+                        geometry=[box(xmin, ymin, xmax, ymax)], crs=2326
+                    ).to_crs(4326)
                     merged_geoms.append(bbox_gdf.geometry.iloc[0])
                     continue
-                # Find the lot polygon that contains the extent centroid
-                cx_2326 = (xmin + xmax) / 2
-                cy_2326 = (ymin + ymax) / 2
-                cx_wgs, cy_wgs = _transformer_2326_to_4326.transform(cx_2326, cy_2326)
+
+                # Pick the polygon closest to this lot's centroid in HK2326
+                cx_wgs, cy_wgs = _t2326_4326.transform(
+                    (xmin+xmax)/2, (ymin+ymax)/2
+                )
                 pt = Point(cx_wgs, cy_wgs)
                 gdf["_dist"] = gdf.geometry.distance(pt)
-                best = gdf.sort_values("_dist").iloc[0]
-                merged_geoms.append(best.geometry)
+                merged_geoms.append(gdf.sort_values("_dist").geometry.iloc[0])
+
             except Exception as e:
-                logging.getLogger(__name__).debug("multi-lot extent fetch failed: %s", e)
+                log.debug("multi-lot extent fetch failed: %s", e)
 
         if merged_geoms:
+            # Merge ALL selected lots into ONE unified polygon
             combined = unary_union(merged_geoms)
-            out = gpd.GeoDataFrame(geometry=[combined], crs=4326).to_crs(3857)
-            return out
+            return gpd.GeoDataFrame(geometry=[combined], crs=4326).to_crs(3857)
 
     # ── SINGLE LOT: centroid-based search ─────────────────────
     cache_key = (round(lon, 5), round(lat, 5), data_type)
@@ -103,49 +116,59 @@ def get_lot_boundary(lon: float, lat: float, data_type: str,
 
     lit = _LOT_INDEX_TYPE.get(data_type, "lot")
     try:
-        to_2326  = Transformer.from_crs(4326, 2326, always_xy=True)
-        x2326, y2326 = to_2326.transform(lon, lat)
-        minx = x2326 - LOT_INDEX_BBOX_M
-        miny = y2326 - LOT_INDEX_BBOX_M
-        maxx = x2326 + LOT_INDEX_BBOX_M
-        maxy = y2326 + LOT_INDEX_BBOX_M
-        gdf = _fetch_lot_gml(lit, minx, miny, maxx, maxy)
+        x2326, y2326 = _t4326_2326.transform(lon, lat)
+        gdf = _fetch_lot_gml(
+            lit,
+            x2326 - LOT_INDEX_BBOX_M, y2326 - LOT_INDEX_BBOX_M,
+            x2326 + LOT_INDEX_BBOX_M, y2326 + LOT_INDEX_BBOX_M,
+        )
         if gdf is None or gdf.empty:
             _LOT_BOUNDARY_CACHE[cache_key] = None
             return None
 
         pt = Point(lon, lat)
-        for idx, row in gdf.iterrows():
+
+        # Prefer a polygon that actually contains the resolved point
+        for _, row in gdf.iterrows():
             if row.geometry and row.geometry.contains(pt):
-                out = gpd.GeoDataFrame(geometry=[row.geometry], crs=4326).to_crs(3857)
+                out = gpd.GeoDataFrame(
+                    geometry=[row.geometry], crs=4326
+                ).to_crs(3857)
                 _LOT_BOUNDARY_CACHE[cache_key] = out
                 return out
 
+        # Fallback: closest polygon within ~50m (in degrees at HK lat ≈ 0.0005°)
         gdf["_dist"] = gdf.geometry.distance(pt)
-        idx = gdf["_dist"].idxmin()
-        if gdf.loc[idx, "_dist"] < 0.001:
-            out = gpd.GeoDataFrame(geometry=[gdf.loc[idx, "geometry"]], crs=4326).to_crs(3857)
+        best = gdf.sort_values("_dist").iloc[0]
+        if best["_dist"] < 0.001:
+            out = gpd.GeoDataFrame(
+                geometry=[best.geometry], crs=4326
+            ).to_crs(3857)
             _LOT_BOUNDARY_CACHE[cache_key] = out
             return out
 
     except Exception as e:
-        logging.getLogger(__name__).debug("get_lot_boundary failed: %s", e)
+        log.debug("get_lot_boundary single-lot failed: %s", e)
 
     _LOT_BOUNDARY_CACHE[cache_key] = None
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC: resolve_location  → (lon, lat) WGS84
+#
+# Priority order:
+#   1. ADDRESS   → return pre-resolved lon/lat directly
+#   2. Multi-lot → centroid of merged extents bbox
+#   3. Pre-resolved lon/lat from search results
+#   4. HK Gov GIS SearchNumber API call
+# ─────────────────────────────────────────────────────────────────────────────
 def resolve_location(data_type: str, value: str,
                      lon: float = None, lat: float = None,
                      lot_ids: list = None, extents: list = None):
-    """
-    Resolves to (lon, lat) in WGS84.
-    ADDRESS type: returns pre-resolved coords directly.
-    Multi-lot: uses centroid of merged extents as the analysis point.
-    All other types: calls HK Gov GIS SearchNumber API.
-    """
     data_type = data_type.upper()
 
+    # ADDRESS: coords come pre-resolved from frontend search
     if data_type == "ADDRESS":
         if lon is not None and lat is not None:
             return lon, lat
@@ -153,46 +176,37 @@ def resolve_location(data_type: str, value: str,
             "ADDRESS type requires pre-resolved lon/lat from /search results."
         )
 
-    # Multi-lot: derive centroid from merged extents
+    # Multi-lot: use centroid of merged bounding box of all extents
     if extents and len(extents) > 1:
-        valid_extents = [e for e in extents if e and e.get("xmin")]
-        if valid_extents:
-            all_xmin = min(e["xmin"] for e in valid_extents)
-            all_ymin = min(e["ymin"] for e in valid_extents)
-            all_xmax = max(e["xmax"] for e in valid_extents)
-            all_ymax = max(e["ymax"] for e in valid_extents)
-            cx = (all_xmin + all_xmax) / 2
-            cy = (all_ymin + all_ymax) / 2
-            lon_out, lat_out = _transformer_2326_to_4326.transform(cx, cy)
+        valid = [e for e in extents if e and e.get("xmin")]
+        if valid:
+            cx = (min(e["xmin"] for e in valid) + max(e["xmax"] for e in valid)) / 2
+            cy = (min(e["ymin"] for e in valid) + max(e["ymax"] for e in valid)) / 2
+            lon_out, lat_out = _t2326_4326.transform(cx, cy)
             return lon_out, lat_out
 
-    # If we already have pre-resolved coords (from search), use them
+    # Single lot with pre-resolved coords from search
     if lon is not None and lat is not None:
         return lon, lat
 
     if data_type not in ALLOWED_TYPES:
         raise ValueError(f"Unsupported data type: {data_type}")
 
+    # Fall back to live API lookup
     url = (
         f"{BASE_URL}/lus/{data_type.lower()}/SearchNumber"
         f"?text={value.replace(' ', '%20')}"
     )
-    response = requests.get(url)
+    resp = requests.get(url, timeout=15)
+    if resp.status_code != 200:
+        raise ValueError("Failed to resolve location: API returned non-200.")
 
-    if response.status_code != 200:
-        raise ValueError("Failed to resolve number.")
+    data = resp.json()
+    if not data.get("candidates"):
+        raise ValueError(f"No matching result found for {data_type} {value}.")
 
-    data = response.json()
-
-    if "candidates" not in data or len(data["candidates"]) == 0:
-        raise ValueError("No matching result found.")
-
-    best  = max(data["candidates"], key=lambda x: x.get("score", 0))
-    x2326 = best["location"]["x"]
-    y2326 = best["location"]["y"]
-
-    lon_out, lat_out = Transformer.from_crs(
-        2326, 4326, always_xy=True
-    ).transform(x2326, y2326)
-
+    best    = max(data["candidates"], key=lambda x: x.get("score", 0))
+    x2326   = best["location"]["x"]
+    y2326   = best["location"]["y"]
+    lon_out, lat_out = _t2326_4326.transform(x2326, y2326)
     return lon_out, lat_out
