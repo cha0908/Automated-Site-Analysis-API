@@ -5,12 +5,11 @@ import contextily as cx
 import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
-from typing import Optional, List
+from typing import Optional
 from shapely.geometry import Point
 from sklearn.cluster import KMeans
 from io import BytesIO
 
-# UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
@@ -53,7 +52,8 @@ def context_rules(site_type):
 def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame,
                      radius_m: Optional[int] = None,
                      lon: float = None, lat: float = None,
-                     lot_ids: List[str] = None, extents: List[dict] = None):
+                     lot_ids: list = None, extents: list = None):
+
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
     half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
