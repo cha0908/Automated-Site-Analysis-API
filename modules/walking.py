@@ -98,7 +98,8 @@ def generate_walking(data_type: str, value: str,
         max_walk_minutes = 15
     cfg        = RING_CONFIGS[max_walk_minutes]
     MAP_EXTENT = cfg["map_extent"]
-
+    MAP_EXTENT_X = MAP_EXTENT * (992 / 737)
+    MAP_EXTENT_Y = MAP_EXTENT
     lon, lat = resolve_location(data_type, value)
 
     # ── Site footprint ────────────────────────────────────────
@@ -189,7 +190,7 @@ def generate_walking(data_type: str, value: str,
         })
 
     # ── Plot — use lower DPI to save RAM during rendering ─────
-    fig, ax = plt.subplots(figsize=(12, 12))   # slightly smaller figure
+    fig, ax = plt.subplots(figsize=(16.15, 12))   # slightly smaller figure
 
     roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
     del roads   # free road memory before basemap fetch
@@ -233,8 +234,8 @@ def generate_walking(data_type: str, value: str,
     ax.text(site_point.x, site_point.y - (MAP_EXTENT * 0.06),
             "SITE", color="black", weight="bold", ha="center", fontsize=11)
 
-    ax.set_xlim(site_point.x - MAP_EXTENT, site_point.x + MAP_EXTENT)
-    ax.set_ylim(site_point.y - MAP_EXTENT, site_point.y + MAP_EXTENT)
+    ax.set_xlim(site_point.x - MAP_EXTENT_X, site_point.x + MAP_EXTENT_X)
+    ax.set_ylim(site_point.y - MAP_EXTENT_Y, site_point.y + MAP_EXTENT_Y)
     ax.set_aspect("equal")
 
     zoom_level = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)

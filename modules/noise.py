@@ -787,7 +787,7 @@ class NoiseVisualizer:
             "(C) OpenStreetMap  (C) CARTO  |  ATC+LNRS: (C) CSDI HK\n"
             "Screening model - not ISO 9613 compliant",
             fontsize=6.5, color="#777", va="bottom", zorder=30,
-        )
+    )
 
         ax.set_axis_off()
         plt.tight_layout()

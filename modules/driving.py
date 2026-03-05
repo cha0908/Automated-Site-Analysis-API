@@ -240,7 +240,8 @@ def generate_driving(data_type: str, value: str,
         max_drive_minutes = 15
     cfg        = RING_CONFIGS[max_drive_minutes]
     MAP_EXTENT = cfg["map_extent"]
-
+    MAP_EXTENT_X = MAP_EXTENT * (992 / 737)
+    MAP_EXTENT_Y = MAP_EXTENT
     lon, lat = resolve_location(data_type, value)
 
     site_pt_3857 = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
@@ -332,11 +333,15 @@ def generate_driving(data_type: str, value: str,
     gc.collect()
 
     # ── Figure ────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(12, 12))
+    fig, ax = plt.subplots(figsize=(16.15, 12))
     zoom = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)
 
+    ax.set_xlim(cx_val - MAP_EXTENT_X, cx_val + MAP_EXTENT_X)
+    ax.set_ylim(cy_val - MAP_EXTENT_Y, cy_val + MAP_EXTENT_Y)
+    ax.set_aspect("equal")
+
     cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
-                   zoom=zoom, alpha=0.55)
+                   zoom=zoom, alpha=1)
 
     ox.graph_to_gdfs(G, nodes=False).to_crs(3857).plot(
         ax=ax, linewidth=0.3, color="#8a8a8a", alpha=0.35, zorder=1)
@@ -436,8 +441,8 @@ def generate_driving(data_type: str, value: str,
     leg.get_title().set_fontweight("bold")
 
     # ── Axes ──────────────────────────────────────────────────
-    ax.set_xlim(cx_val - MAP_EXTENT, cx_val + MAP_EXTENT)
-    ax.set_ylim(cy_val - MAP_EXTENT, cy_val + MAP_EXTENT)
+    ax.set_xlim(cx_val - MAP_EXTENT_X, cx_val + MAP_EXTENT_X)
+    ax.set_ylim(cy_val - MAP_EXTENT_Y, cy_val + MAP_EXTENT_Y)
     ax.set_aspect("equal")
     _north_arrow(ax, ax.get_xlim(), ax.get_ylim(), MAP_EXTENT)
     ax.set_axis_off()

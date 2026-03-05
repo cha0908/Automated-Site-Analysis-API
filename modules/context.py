@@ -1,3 +1,4 @@
+import os
 import osmnx as ox
 import geopandas as gpd
 import matplotlib.pyplot as plt
@@ -9,9 +10,12 @@ from typing import Optional
 from shapely.geometry import Point
 from sklearn.cluster import KMeans
 from io import BytesIO
+import matplotlib.image as mpimg
+from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 # ✅ UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
+from modules.driving import _add_mtr_icon
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
@@ -19,7 +23,14 @@ ox.settings.log_console = False
 FETCH_RADIUS = 800
 MAP_HALF_SIZE = 600
 NEAREST_NAMED_STATION_M = 150  # fallback unnamed to this named station if within distance (m)
-MTR_COLOR = "#ffd166"
+MTR_COLOR = "#d84315"  # dark orange highlight for MTR stations
+
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
+_BUS_ICON_PATH = os.path.join(_STATIC_DIR, "bus.png")
+try:
+    _bus_icon = mpimg.imread(_BUS_ICON_PATH)
+except Exception:
+    _bus_icon = None
 
 
 # ------------------------------------------------------------
@@ -59,7 +70,8 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, ra
     lon, lat = resolve_location(data_type, value)
     fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
     half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
-
+    half_x = half_size * (992 / 737)
+    half_y = half_size
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
         site_geom = lot_gdf.geometry.iloc[0]
@@ -159,35 +171,75 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, ra
     labels = labels.dropna(subset=["label"]).drop_duplicates("label").head(24)
 
     # --------------------------------------------------------
+    # ALL LABEL SOURCES (by site type: only relevant layers)
+    # --------------------------------------------------------
+    if SITE_TYPE == "RESIDENTIAL":
+        label_sources = (labels, residential, parks, schools)
+    elif SITE_TYPE == "COMMERCIAL":
+        label_sources = (labels, industrial, parks)
+    elif SITE_TYPE == "INSTITUTIONAL":
+        label_sources = (labels, parks, schools, buildings)
+    else:
+        label_sources = (labels, residential, buildings, parks, schools, industrial)
+    all_label_items = []  # list of (distance, geometry, label)
+    for gdf in label_sources:
+        if gdf.empty:
+            continue
+        gdf = gdf.copy()
+        gdf["label"] = gdf.get("name:en").fillna(gdf.get("name"))
+        named = gdf.dropna(subset=["label"])
+        named["label"] = named["label"].astype(str).str.strip()
+        named = named[named["label"].str.len() > 0]
+        for _, row in named.iterrows():
+            geom = row.geometry
+            text = row["label"]
+            p = geom.representative_point() if hasattr(geom, "representative_point") else geom.centroid
+            dist = p.distance(site_point)
+            all_label_items.append((dist, geom, text))
+    all_label_items.sort(key=lambda x: x[0])
+    all_label_items = [(geom, text) for _, geom, text in all_label_items[:40]]
+
+    # --------------------------------------------------------
     # PLOT
     # --------------------------------------------------------
+    fig, ax = plt.subplots(figsize=(16.15,12))
 
-    fig, ax = plt.subplots(figsize=(12,12))
-
-    ax.set_xlim(site_point.x - half_size, site_point.x + half_size)
-    ax.set_ylim(site_point.y - half_size, site_point.y + half_size)
+    ax.set_xlim(site_point.x - half_x, site_point.x + half_x)
+    ax.set_ylim(site_point.y - half_y, site_point.y + half_y)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=16, alpha=0.95)
+    cx.add_basemap(ax, source=cx.providers.CartoDB.VoyagerNoLabels, zoom=16, alpha=0.95)
 
-    ax.set_xlim(site_point.x - half_size, site_point.x + half_size)
-    ax.set_ylim(site_point.y - half_size, site_point.y + half_size)
+    ax.set_xlim(site_point.x - half_x, site_point.x + half_x)
+    ax.set_ylim(site_point.y - half_y, site_point.y + half_y)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    residential.plot(ax=ax, color="#f2c6a0", alpha=0.75)
-    industrial.plot(ax=ax, color="#b39ddb", alpha=0.75)
+    residential.plot(ax=ax, color="#f2c6a0", alpha=0.9)
+    industrial.plot(ax=ax, color="#b39ddb", alpha=0.9)
     parks.plot(ax=ax, color="#b7dfb9", alpha=0.9)
     schools.plot(ax=ax, color="#9ecae1", alpha=0.9)
     buildings.plot(ax=ax, color="#d9d9d9", alpha=0.35)
 
     if not bus_stops.empty:
-        bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
+        if _bus_icon is not None:
+            for _, row in bus_stops.iterrows():
+                geom = row.geometry
+                bx, by = geom.centroid.x, geom.centroid.y
+                icon = OffsetImage(_bus_icon, zoom=0.02)
+                icon.image.axes = ax
+                ab = AnnotationBbox(icon, (bx, by), frameon=False, zorder=9, box_alignment=(0.5, 0.5))
+                ax.add_artist(ab)
+        else:
+            bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
 
     stations_in_view = stations[stations["dist"] <= half_size] if not stations.empty else stations
     if not stations_in_view.empty:
         stations_in_view.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none", alpha=0.9, zorder=10)
+        for _, st in stations_in_view.iterrows():
+            c = st.geometry.centroid
+            _add_mtr_icon(ax, c.x, c.y, size=0.035, zorder=14)
 
     site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred", linewidth=2, zorder=11)
 
@@ -195,36 +247,25 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, ra
             color="white", weight="bold", ha="center", va="center", zorder=12)
 
     # --------------------------------------------------------
-    # DRAW PLACE LABELS (RESTORED)
+    # DRAW PLACE LABELS (all sources: labels, residential, buildings, parks, schools, industrial)
     # --------------------------------------------------------
-
-    offsets = [(0,35),(0,-35),(35,0),(-35,0),(25,25),(-25,25)]
     placed = []
-
-    for i, (_, row) in enumerate(labels.iterrows()):
-
-        p = row.geometry.representative_point()
-
+    for geom, text in all_label_items:
+        p = geom.representative_point() if hasattr(geom, "representative_point") else geom.centroid
         if p.distance(site_point) < 140:
             continue
-
-        if any(p.distance(pp) < 120 for pp in placed):
+        if any(p.distance(pp) < 100 for pp in placed):
             continue
-
-        dx, dy = offsets[i % len(offsets)]
-
         ax.text(
-            p.x + dx,
-            p.y + dy,
-            wrap_label(row["label"], 18),
-            fontsize=9,
-            ha="center",
-            va="center",
-            bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, boxstyle="round,pad=0.25"),
+            p.x, p.y,
+            wrap_label(text, 18),
+            fontfamily="Arial",
+            fontsize=12, weight="bold",
+            ha="center", va="center",
+            color="black",
             zorder=12,
-            clip_on=True
+            clip_on=True,
         )
-
         placed.append(p)
 
     # --------------------------------------------------------
@@ -252,11 +293,8 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, ra
                 st.centroid.x,
                 st.centroid.y + 120,
                 wrap_label(label_name, 18),
-                fontsize=9,
-                ha="center",
-                va="center",
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=1.0),
-                zorder=12
+                fontsize=10, weight="bold", color="black",
+                ha="center", va="bottom", zorder=15
             )
 
     # --------------------------------------------------------
