@@ -356,7 +356,7 @@ def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame,
     title_max = (f"SITE ANALYSIS – View Analysis (MAX HEIGHT)\n"
                  f"ref = H_max = {H_max:.1f} m  (site building = {H_max:.1f} m)")
 
-    # ── 7. Render two panels side-by-side ──────────────────────────────────────
+    # ── 7. Render two panels side-by-side ─────────────────────────────────────
     fig, axes = plt.subplots(1, 2, figsize=(22, 11))
 
     fig.suptitle(
