@@ -145,10 +145,12 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 def generate_transport(data_type: str, value: str,
                        radius_m: Optional[int] = None,
                        lon: float = None, lat: float = None,
-                       lot_ids: List[str] = None, extents: List[dict] = None):
-    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
+                       lot_ids: List[str] = None,
+                       extents: List[dict] = None):
+
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     r = radius_m if radius_m is not None else MAP_RADIUS
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
