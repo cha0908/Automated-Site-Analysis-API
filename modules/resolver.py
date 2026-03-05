@@ -22,6 +22,20 @@ _t4326_2326 = Transformer.from_crs(4326, 2326, always_xy=True)
 log = logging.getLogger(__name__)
 
 
+def _coerce(v):
+    """Safely convert lon/lat to float, unwrapping single-element lists."""
+    if v is None:
+        return None
+    if isinstance(v, list):
+        if len(v) == 0:
+            return None
+        v = v[0]
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fetch_lot_gml(lit, minx, miny, maxx, maxy):
     url = f"{BASE_URL}/iC1000/{lit}?bbox={minx},{miny},{maxx},{maxy},EPSG:2326"
     try:
@@ -56,6 +70,8 @@ def _fetch_lot_gml(lit, minx, miny, maxx, maxy):
 def get_lot_boundary(lon: float, lat: float, data_type: str,
                      extents: list = None):
     data_type = data_type.upper()
+    lon = _coerce(lon)
+    lat = _coerce(lat)
 
     if data_type == "ADDRESS":
         return None
@@ -96,21 +112,16 @@ def get_lot_boundary(lon: float, lat: float, data_type: str,
             return gpd.GeoDataFrame(geometry=[combined], crs=4326).to_crs(3857)
 
     # ── SINGLE LOT ────────────────────────────────────────────
-    # Guard: ensure lon/lat are plain floats before round()
-    try:
-        lon_f = float(lon)
-        lat_f = float(lat)
-    except (TypeError, ValueError):
-        log.debug("get_lot_boundary: invalid lon/lat (%s, %s)", lon, lat)
+    if lon is None or lat is None:
         return None
 
-    cache_key = (round(lon_f, 5), round(lat_f, 5), data_type)
+    cache_key = (round(lon, 5), round(lat, 5), data_type)
     if cache_key in _LOT_BOUNDARY_CACHE:
         return _LOT_BOUNDARY_CACHE[cache_key]
 
     lit = _LOT_INDEX_TYPE.get(data_type, "lot")
     try:
-        x2326, y2326 = _t4326_2326.transform(lon_f, lat_f)
+        x2326, y2326 = _t4326_2326.transform(lon, lat)
         gdf = _fetch_lot_gml(
             lit,
             x2326 - LOT_INDEX_BBOX_M, y2326 - LOT_INDEX_BBOX_M,
@@ -120,7 +131,7 @@ def get_lot_boundary(lon: float, lat: float, data_type: str,
             _LOT_BOUNDARY_CACHE[cache_key] = None
             return None
 
-        pt = Point(lon_f, lat_f)
+        pt = Point(lon, lat)
 
         for _, row in gdf.iterrows():
             if row.geometry and row.geometry.contains(pt):
@@ -146,10 +157,12 @@ def resolve_location(data_type: str, value: str,
                      lon: float = None, lat: float = None,
                      lot_ids: list = None, extents: list = None):
     data_type = data_type.upper()
+    lon = _coerce(lon)
+    lat = _coerce(lat)
 
     if data_type == "ADDRESS":
         if lon is not None and lat is not None:
-            return float(lon), float(lat)
+            return lon, lat
         raise ValueError(
             "ADDRESS type requires pre-resolved lon/lat from /search results."
         )
@@ -161,11 +174,11 @@ def resolve_location(data_type: str, value: str,
             cx = (min(float(e["xmin"]) for e in valid) + max(float(e["xmax"]) for e in valid)) / 2
             cy = (min(float(e["ymin"]) for e in valid) + max(float(e["ymax"]) for e in valid)) / 2
             lon_out, lat_out = _t2326_4326.transform(cx, cy)
-            return float(lon_out), float(lat_out)
+            return lon_out, lat_out
 
     # Single lot with pre-resolved coords
     if lon is not None and lat is not None:
-        return float(lon), float(lat)
+        return lon, lat
 
     if data_type not in ALLOWED_TYPES:
         raise ValueError(f"Unsupported data type: {data_type}")
@@ -187,4 +200,4 @@ def resolve_location(data_type: str, value: str,
     x2326 = best["location"]["x"]
     y2326 = best["location"]["y"]
     lon_out, lat_out = _t2326_4326.transform(x2326, y2326)
-    return float(lon_out), float(lat_out)
+    return lon_out, lat_out
