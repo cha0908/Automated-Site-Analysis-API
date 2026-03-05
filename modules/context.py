@@ -53,12 +53,12 @@ def context_rules(site_type):
 def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame,
                      radius_m: Optional[int] = None,
                      lon: float = None, lat: float = None,
-                     lot_ids: list = None, extents: list = None):
+                     lot_ids: List[str] = None, extents: List[dict] = None):
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
     half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
 
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents if extents else None)
     if lot_gdf is not None:
         site_geom = lot_gdf.geometry.iloc[0]
         site_gdf = lot_gdf
