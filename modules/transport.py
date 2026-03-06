@@ -1,7 +1,7 @@
-from typing import Optional, List
 import matplotlib
 matplotlib.use("Agg")
 
+from typing import Optional, List
 import os
 import gc
 import osmnx as ox
@@ -37,6 +37,11 @@ COLOR_LIGHT_RAIL     = "#D3A809"
 STATION_MIN_DISTANCE = 250
 STATION_LOGO_ZOOM    = 0.055
 
+# ============================================================
+# MAP EXTENT — symmetric around site centre
+# ============================================================
+HALF_W = 1900
+HALF_H = 1100
 
 # ============================================================
 # MTR LINE COLOR MAP
@@ -83,8 +88,8 @@ def get_mtr_color(name: str) -> str:
 
 def _make_label(clean_name: str) -> str:
     """
-    Produces 'MTR XXXX LINE' label, stripping any existing
-    'MTR ' prefix from the OSM name first to prevent duplication.
+    Produces 'MTR XXXX LINE' label.
+    Strips any existing 'MTR ' prefix from the OSM name to prevent duplication.
     """
     upper = clean_name.upper().strip()
     if upper.startswith("MTR "):
@@ -106,7 +111,7 @@ try:
 except Exception as e:
     _mtr_img        = None
     MTR_LOGO_LOADED = False
-    print(f"MTR logo not found ({e}). Using fallback.")
+    print(f"MTR logo not found ({e}). Using fallback roundel.")
 
 
 # ============================================================
@@ -118,17 +123,17 @@ def _draw_roundel_fallback(ax, x, y, size=60, color="#ED1D24", zorder=9):
     bar_w = size * 2.0
     bar_h = size * 0.55
     ax.add_patch(plt.Rectangle(
-        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
+        (x - bar_w / 2, y - bar_h / 2), bar_w, bar_h,
         color="white", zorder=zorder + 1))
     ax.add_patch(plt.Circle((x, y), size * 0.55,
                              color="white", zorder=zorder + 2))
     ax.add_patch(plt.Rectangle(
-        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
+        (x - bar_w / 2, y - bar_h / 2), bar_w, bar_h,
         color=color, zorder=zorder + 3))
 
 
 # ============================================================
-# DRAW STATION
+# DRAW STATION MARKER  (logo image or fallback roundel)
 # ============================================================
 
 def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
@@ -170,7 +175,6 @@ def _keep_lines(gdf):
 
 # ============================================================
 # FLATTEN OSMnx MultiIndex
-# Must be called on EACH GeoDataFrame individually BEFORE concat.
 # OSMnx returns a MultiIndex (element_type, osmid). Calling
 # pd.concat on two raw OSMnx GDFs misaligns attribute columns
 # ("name" shifts or disappears). Flattening each frame first
@@ -192,7 +196,7 @@ def _flatten(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 # ============================================================
-# MTR ROUTE FETCH
+# MTR ROUTE FETCH — rail + subway combined, deduped
 # ============================================================
 
 def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
@@ -239,33 +243,15 @@ def generate_transport(data_type: str, value: str,
 
     # --------------------------------------------------------
     # FETCH DATA
-    #
-    # FIX 1 — BUILDINGS: Do NOT filter to polygons only.
-    # OSMnx returns building footprints as closed Ways (Polygons)
-    # AND Relations (MultiPolygons). In some areas like Sheung Wan,
-    # many blocks are tagged as relations which may come back as
-    # Polygons OR LineStrings depending on OSMnx version.
-    # Using the raw GDF with all geometry types ensures nothing
-    # is dropped. We only exclude Point geometries which cannot
-    # be filled as area features.
-    #
-    # FIX 2 — ROADS: Extended highway hierarchy to include
-    # tertiary, residential, and service roads. Areas like Sheung
-    # Wan / Mid-Levels have very few primary/trunk roads — the
-    # map was empty because only motorway→secondary were fetched.
-    #
-    # FIX 3 — WATER: Add natural=bay and place=sea queries to
-    # capture Victoria Harbour which is not tagged natural=water.
-    # Harbour is mapped as a Relation with natural=bay in OSM.
     # --------------------------------------------------------
 
-    # Buildings — keep all area geometry types
+    # Buildings — keep only filled area geometries
     _bld_raw  = _safe_fetch(lat, lon, r, {"building": True})
     buildings = _bld_raw[
         _bld_raw.geometry.type.isin(["Polygon", "MultiPolygon"])
     ] if not _bld_raw.empty else gpd.GeoDataFrame(geometry=[], crs=3857)
 
-    # Roads — full urban hierarchy
+    # Roads — full urban hierarchy for dense HK areas
     roads = _keep_lines(_safe_fetch(lat, lon, r, {
         "highway": [
             "motorway", "trunk", "primary", "secondary",
@@ -276,11 +262,11 @@ def generate_transport(data_type: str, value: str,
     light_rail = _keep_lines(_safe_fetch(lat, lon, r, {"railway": "light_rail"}))
     mtr_routes = _fetch_mtr_routes(lat, lon, r)
 
-    # Stations — flatten immediately after fetch
+    # Stations — flatten immediately after fetch to preserve "name" column
     _sta_raw = _safe_fetch(lat, lon, r, {"railway": "station"})
     stations = _flatten(_sta_raw) if not _sta_raw.empty else gpd.GeoDataFrame(geometry=[], crs=3857)
 
-    # Water — fetch both natural=water and natural=bay (harbour)
+    # Water — natural=water + natural=bay (Victoria Harbour)
     _w1 = _safe_fetch(lat, lon, r, {"natural": "water"})
     _w2 = _safe_fetch(lat, lon, r, {"natural": "bay"})
     _w_frames = [f for f in [_w1, _w2] if not f.empty]
@@ -296,7 +282,7 @@ def generate_transport(data_type: str, value: str,
     gc.collect()
 
     # --------------------------------------------------------
-    # SITE POLYGON
+    # SITE POLYGON  (fallback to nearest building or buffer)
     # --------------------------------------------------------
 
     if lot_gdf is None:
@@ -309,11 +295,8 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # MAP EXTENT — symmetric, site centred
+    # MAP EXTENT — symmetric around site centroid
     # --------------------------------------------------------
-
-    HALF_W = 1900
-    HALF_H = 1100
 
     xmin = site_point.x - HALF_W
     xmax = site_point.x + HALF_W
@@ -324,13 +307,14 @@ def generate_transport(data_type: str, value: str,
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT — extent locked BEFORE cx.add_basemap
+    # PLOT — lock extent BEFORE adding basemap
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
+    # Lock extent first so basemap tiles align correctly
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
@@ -348,7 +332,7 @@ def generate_transport(data_type: str, value: str,
     if not water.empty:
         water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
 
-    # Roads — clip to viewport before plotting for performance
+    # Clip roads to viewport before plotting (performance)
     if not roads.empty:
         try:
             roads_clipped = gpd.clip(roads, clip_gdf)
@@ -358,17 +342,15 @@ def generate_transport(data_type: str, value: str,
             roads.plot(ax=ax, color=COLOR_ROADS, linewidth=1.4, zorder=3)
 
     # --------------------------------------------------------
-    # MTR ROUTES — per-line coloring
+    # MTR ROUTES — per-line coloring with white outline
     # --------------------------------------------------------
 
-    lines_on_map = {}
+    lines_on_map = {}   # color → display_label (for legend, deduplicated)
 
     if not mtr_routes.empty:
-
         mtr_visible = gpd.clip(mtr_routes, clip_gdf)
 
         if not mtr_visible.empty:
-
             placed_positions = []
             name_col = "name" if "name" in mtr_visible.columns else None
 
@@ -376,6 +358,7 @@ def generate_transport(data_type: str, value: str,
                 unique_names = mtr_visible[name_col].dropna().unique()
 
                 for name in unique_names:
+                    # Strip non-ASCII for clean label rendering
                     clean_name = ''.join(c for c in name if ord(c) < 128).strip()
                     if clean_name == "":
                         continue
@@ -383,9 +366,11 @@ def generate_transport(data_type: str, value: str,
                     line_color = get_mtr_color(clean_name)
                     subset     = mtr_visible[mtr_visible[name_col] == name]
 
+                    # White outline then colored line
                     subset.plot(ax=ax, color="white",    linewidth=8,   zorder=4)
                     subset.plot(ax=ax, color=line_color, linewidth=4.5, zorder=5)
 
+                    # Track for legend (deduplicate by color)
                     if line_color not in lines_on_map:
                         official_label = clean_name.title()
                         for key, c, label in MTR_LEGEND_LINES:
@@ -394,15 +379,18 @@ def generate_transport(data_type: str, value: str,
                                 break
                         lines_on_map[line_color] = official_label
 
+                    # Line annotation label — only for lines >= 600 m visible length
                     merged = subset.union_all()
                     if merged.length < 600:
                         continue
 
                     midpoint = merged.interpolate(0.5, normalized=True)
+
+                    # Offset labels that overlap
                     offset_y = 0
                     for pt in placed_positions:
                         if midpoint.distance(pt) < 500:
-                            offset_y += 150
+                            offset_y += 160
 
                     new_point = Point(midpoint.x, midpoint.y + offset_y)
                     placed_positions.append(new_point)
@@ -419,39 +407,38 @@ def generate_transport(data_type: str, value: str,
                                       alpha=0.85, pad=2)
                         )
 
+                # Unnamed routes fallback
                 unnamed = mtr_visible[mtr_visible[name_col].isna()]
                 if not unnamed.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                     unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
 
             else:
+                # No name column at all
                 mtr_visible.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                 mtr_visible.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
 
     # --------------------------------------------------------
-    # LIGHT RAIL
+    # LIGHT RAIL — official yellow
     # --------------------------------------------------------
 
     if not light_rail.empty:
-        light_rail.plot(ax=ax, color="white",          linewidth=6,   zorder=4)
-        light_rail.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
+        light_rail_clipped = gpd.clip(light_rail, clip_gdf) if not light_rail.empty else light_rail
+        if not light_rail_clipped.empty:
+            light_rail_clipped.plot(ax=ax, color="white",          linewidth=6,   zorder=4)
+            light_rail_clipped.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
 
     # --------------------------------------------------------
-    # STATIONS
-    # FIX 4 — Stations: stations GDF is already flattened above
-    # at fetch time. Use gpd.GeoDataFrame.assign() to compute
-    # centroids safely without overwriting active geometry column,
-    # then filter using centroid coordinates.
+    # STATIONS — MTR logo image (or fallback roundel) + name label
     # --------------------------------------------------------
 
     if not stations.empty:
-
-        # Compute centroid coordinates without clobbering geometry column
+        # Compute centroid coordinates as separate columns
         stations = stations.copy()
         stations["_cx"] = stations.geometry.centroid.x
         stations["_cy"] = stations.geometry.centroid.y
 
-        # Filter to map viewport
+        # Filter to map viewport only
         in_view = stations[
             (stations["_cx"] >= xmin) & (stations["_cx"] <= xmax) &
             (stations["_cy"] >= ymin) & (stations["_cy"] <= ymax)
@@ -464,12 +451,14 @@ def generate_transport(data_type: str, value: str,
             sy = row["_cy"]
             current_pt = Point(sx, sy)
 
+            # Deduplicate stations that are very close (same interchange complex)
             if any(current_pt.distance(p) < STATION_MIN_DISTANCE
                    for p in placed_station_positions):
                 continue
 
             placed_station_positions.append(current_pt)
 
+            # Determine fallback color from route proximity
             fallback_color = "#ED1D24"
             name_val = row.get("name", None)
             if isinstance(name_val, str) and name_val.strip():
@@ -492,6 +481,7 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
+            # Station name label below icon
             if isinstance(name_val, str) and name_val.strip():
                 display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
                 if display_name:
@@ -503,21 +493,24 @@ def generate_transport(data_type: str, value: str,
                         color="#333333",
                         zorder=10,
                         bbox=dict(facecolor="white", edgecolor="none",
-                                  alpha=0.7, pad=1.5)
+                                  alpha=0.75, pad=1.5)
                     )
 
     # --------------------------------------------------------
-    # SITE
+    # SITE — drawn last so always on top
     # --------------------------------------------------------
 
-    site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="none", zorder=13)
+    site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="white",
+                  linewidth=1.5, zorder=13)
 
     centroid = site_geom.centroid
     ax.text(
         centroid.x, centroid.y - 120,
         "SITE",
         fontsize=14, weight="bold",
-        ha="center", zorder=14
+        color="black",
+        ha="center", zorder=14,
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.7, pad=2)
     )
 
     # --------------------------------------------------------
@@ -531,25 +524,27 @@ def generate_transport(data_type: str, value: str,
         arrowprops=dict(facecolor='black', width=1.5, headwidth=8, headlength=10)
     )
     ax.text(0.07, 0.86, "N", transform=ax.transAxes,
-            ha='center', va='bottom', fontsize=12)
+            ha='center', va='bottom', fontsize=12, weight='bold')
 
     # --------------------------------------------------------
-    # RE-LOCK EXTENT — geopandas .plot() resets limits
+    # RE-LOCK EXTENT — geopandas .plot() can reset limits
     # --------------------------------------------------------
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
     # --------------------------------------------------------
-    # LEGEND
+    # LEGEND — ordered, deduplicated, clean
     # --------------------------------------------------------
 
     legend_handles = []
 
+    # Light Rail
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail")
     )
 
+    # MTR lines present on the map — in official order, deduplicated by color
     seen_colors = set()
     for key, color, label in MTR_LEGEND_LINES:
         if color in lines_on_map and color not in seen_colors:
@@ -558,18 +553,23 @@ def generate_transport(data_type: str, value: str,
             )
             seen_colors.add(color)
 
+    # Vehicle roads
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation")
     )
+
+    # Site patch
     legend_handles.append(
         mpatches.Patch(facecolor=COLOR_SITE, label="Site")
     )
 
+    # MTR Station — logo thumbnail if loaded, else red circle
+    handler_map = {}
     if MTR_LOGO_LOADED and _mtr_img is not None:
-        pil_thumb = Image.fromarray(
-            ((_mtr_img * 255).astype(np.uint8)
-             if _mtr_img.dtype != np.uint8 else _mtr_img)
-        ).resize((20, 20), Image.LANCZOS)
+        # Build a small thumbnail for the legend entry
+        raw_arr = (_mtr_img * 255).astype(np.uint8) \
+                  if _mtr_img.dtype != np.uint8 else _mtr_img
+        pil_thumb = Image.fromarray(raw_arr).resize((20, 20), Image.LANCZOS)
         thumb_arr = np.array(pil_thumb)
 
         class LogoHandler(mlines.Line2D):
@@ -602,11 +602,10 @@ def generate_transport(data_type: str, value: str,
                 label="MTR Station"
             )
         )
-        handler_map = {}
 
     legend = ax.legend(
         handles=legend_handles,
-        handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
+        handler_map=handler_map if handler_map else None,
         loc="lower left",
         bbox_to_anchor=(0.02, 0.02),
         frameon=True,
@@ -632,6 +631,10 @@ def generate_transport(data_type: str, value: str,
     )
 
     ax.set_axis_off()
+
+    # --------------------------------------------------------
+    # SAVE TO BUFFER
+    # --------------------------------------------------------
 
     buffer = BytesIO()
     plt.savefig(buffer, format="png", dpi=200,
