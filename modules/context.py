@@ -240,34 +240,50 @@ def generate_context(
     hi_label  = HIGHLIGHT_LABEL.get(SITE_TYPE, "Nearby Buildings")
     log.info(f"[context] zone={zone} site_type={SITE_TYPE}")
 
-    # ── 3 parallel fetches only ───────────────────────────────────────────────
-    # FETCH 1 "base": everything except buildings — landuse, leisure, amenity,
-    #                  bus stops, stations, place labels all in one call
-    # FETCH 2 "similar": type-specific building tags
-    # FETCH 3 "stations": MTR stations at wider radius for accuracy
-    log.info("[context] Fetching 3 tasks in parallel (120s limit)...")
+    # Per-type support tags
+    SUPPORT_TAGS = {
+        "RESIDENTIAL": {"amenity": ["school", "college", "university",
+                                    "hospital", "supermarket"],
+                        "leisure": ["park"], "shop": ["supermarket"]},
+        "HOTEL":       {"tourism": ["attraction"], "amenity": ["restaurant"],
+                        "shop": ["mall"]},
+        "COMMERCIAL":  {"amenity": ["bank", "restaurant"], "railway": ["station"]},
+        "INSTITUTIONAL": {"leisure": ["park"], "amenity": ["library"]},
+        "INDUSTRIAL":  {"railway": ["rail"], "landuse": ["port"]},
+        "OTHER":       {"amenity": True},
+        "MIXED":       {"amenity": True, "leisure": True},
+    }
+    sup_tags = SUPPORT_TAGS.get(SITE_TYPE, SUPPORT_TAGS["MIXED"])
+
+    # ── 4 parallel fetches ────────────────────────────────────────────────────
+    log.info("[context] Fetching 4 tasks in parallel (120s limit)...")
     results = _parallel_fetch({
         "base": (lat, lon, fetch_r, {
             "landuse":  True,
             "leisure":  ["park", "playground", "garden", "recreation_ground"],
-            "amenity":  ["school", "college", "university", "hospital",
-                         "supermarket", "restaurant", "bank"],
             "highway":  ["bus_stop"],
             "place":    ["neighbourhood", "suburb"],
         }),
         "similar":  (lat, lon, fetch_r, sim_tags),
+        "support":  (lat, lon, fetch_r, sup_tags),
         "stations": (lat, lon, 1200,    {"railway": "station"}),
     }, wall_timeout=120)
     gc.collect()
 
-    # ── Derive all layers from base ───────────────────────────────────────────
+    # ── Derive all layers ─────────────────────────────────────────────────────
     base = results["base"]
 
     residential_area = _filter_col(base, "landuse", "residential")
     industrial_area  = _filter_col(base, "landuse", ["industrial", "commercial"])
     parks            = _filter_col(base, "leisure", "park")
-    schools          = _filter_col(base, "amenity",
-                                   ["school", "college", "university"])
+
+    # Schools/hospitals from support fetch
+    support_raw = results["support"]
+    schools     = _filter_col(support_raw, "amenity",
+                              ["school", "college", "university"]) \
+                  if not support_raw.empty else _EMPTY.copy()
+    hospitals   = _filter_col(support_raw, "amenity", ["hospital"]) \
+                  if not support_raw.empty else _EMPTY.copy()
 
     # Bus stops — points with highway=bus_stop
     bus_stops_gdf = _EMPTY.copy()
@@ -276,18 +292,17 @@ def generate_context(
         if not bs.empty:
             bus_stops_gdf = bs
 
-    # Similar buildings — named, significant size only (no tiny generic buildings)
+    # Similar buildings — ALL named polygons >= 200m² (relax area threshold)
     _sim_raw = _polys_only(results["similar"])
     if not _sim_raw.empty:
-        # Only keep buildings with an English/ASCII name
+        _sim_raw = _sim_raw.copy()
         _sim_raw["_name"] = _get_name(_sim_raw)
-        _sim_named = _sim_raw[_sim_raw["_name"].apply(
-            lambda x: bool(_ascii_only(str(x))) if pd.notna(x) else False
-        )].copy()
-        # Minimum area: ~300m² (filters out tiny row houses / single units)
-        _sim_named = _sim_named[_sim_named.geometry.area >= 300]
-        similar_blds = _sim_named if not _sim_named.empty else _EMPTY.copy()
-        log.info(f"[context] similar after name+area filter: {len(similar_blds)} rows")
+        # Keep named ones; also keep unnamed if large enough (housing estate blocks)
+        _named_mask = _sim_raw["_name"].apply(
+            lambda x: bool(_ascii_only(str(x))) if pd.notna(x) else False)
+        _large_mask = _sim_raw.geometry.area >= 500
+        similar_blds = _sim_raw[_named_mask | _large_mask].copy()
+        log.info(f"[context] similar after filter: {len(similar_blds)} rows")
     else:
         similar_blds = _EMPTY.copy()
 
@@ -339,13 +354,13 @@ def generate_context(
                     if hasattr(geom, "representative_point") else geom.centroid)
             all_label_items.append((p.distance(site_point), geom, text))
 
-    for src in [base, schools, parks, similar_blds]:
+    for src in [base, schools, hospitals, parks, similar_blds, support_raw]:
         _collect(src)
 
     all_label_items.sort(key=lambda x: x[0])
     all_label_items = [(g, t) for _, g, t in all_label_items[:35]]
 
-    del base, results
+    del base, support_raw, results
     gc.collect()
 
     log.info("[context] Rendering...")
@@ -377,8 +392,9 @@ def generate_context(
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
     _safe_plot(schools,          ax, color="#9ecae1", alpha=0.90, zorder=2)
+    _safe_plot(hospitals,        ax, color="#aec6cf", alpha=0.90, zorder=2)
 
-    del residential_area, industrial_area, parks, schools
+    del residential_area, industrial_area, parks
     gc.collect()
 
     # ── Similar / type-specific buildings ────────────────────────────────────
@@ -418,23 +434,22 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site — halo + fill so tiny lots are always visible ───────────────────
+    # ── Site — white halo + red fill, label above ────────────────────────────
     try:
         sc = site_geom.centroid
-        # White halo ring (drawn first, behind the red fill)
-        halo = site_geom.buffer(30)
-        halo_gdf = gpd.GeoDataFrame(geometry=[halo], crs=3857)
-        halo_gdf.plot(ax=ax, facecolor="white", edgecolor="white",
-                      linewidth=0, zorder=14, alpha=0.9)
-        # Red site polygon
+        # White halo so the site stands out from background
+        halo_gdf = gpd.GeoDataFrame(geometry=[site_geom.buffer(25)], crs=3857)
+        halo_gdf.plot(ax=ax, facecolor="white", edgecolor="none",
+                      linewidth=0, zorder=14, alpha=0.85)
+        # Red fill
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred",
-                      linewidth=2.5, zorder=15)
-        # SITE label with white bbox so it's readable over buildings
-        ax.text(sc.x, sc.y - site_geom.bounds[3] + sc.y - 50,
-                "SITE", color="white", weight="bold",
-                fontsize=9, ha="center", va="top", zorder=16,
+                      linewidth=2.0, zorder=15)
+        # Simple label just above the site centroid
+        ax.text(sc.x, sc.y + 55, "SITE",
+                color="white", weight="bold", fontsize=9,
+                ha="center", va="bottom", zorder=16,
                 bbox=dict(facecolor="#e53935", edgecolor="none",
-                          alpha=0.9, pad=2, boxstyle="round"))
+                          alpha=1.0, pad=3))
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
@@ -497,6 +512,7 @@ def generate_context(
             mpatches.Patch(color="#b39ddb",   label="Industrial / Commercial Area"),
             mpatches.Patch(color="#b7dfb9",   label="Public Park"),
             mpatches.Patch(color="#9ecae1",   label="School / Institution"),
+            mpatches.Patch(color="#aec6cf",   label="Hospital"),
             mpatches.Patch(color=hi_color, alpha=0.80, label=hi_label),
             mpatches.Patch(color=MTR_COLOR,   label="MTR Station"),
             mpatches.Patch(color="#e53935",   label="Site"),
