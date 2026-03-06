@@ -30,11 +30,12 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 MAP_RADIUS           = 3000
 COLOR_ROADS          = "#e85d9e"
+COLOR_WATER          = "#6fa8dc"   # ← RESTORED: was removed in boss merge
 COLOR_BUILDINGS      = "#d6d6d6"
 COLOR_SITE           = "#FF0000"
 COLOR_LIGHT_RAIL     = "#D3A809"
-STATION_MIN_DISTANCE = 250       # metres — prevents logo overlap
-STATION_LOGO_ZOOM    = 0.055     # adjust to resize logos on map
+STATION_MIN_DISTANCE = 250
+STATION_LOGO_ZOOM    = 0.055
 
 
 # ============================================================
@@ -178,13 +179,14 @@ def generate_transport(data_type: str, value: str,
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
     # --------------------------------------------------------
-    # FETCH DATA
+    # FETCH DATA  ← water fetch RESTORED (removed in boss merge)
     # --------------------------------------------------------
 
     buildings  = safe_fetch({"building": True})
     roads      = keep_lines(safe_fetch({"highway": ["motorway", "trunk", "primary", "secondary"]}))
     light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
     stations   = safe_fetch({"railway": "station"})
+    water      = safe_fetch({"natural": "water"})   # ← RESTORED
     mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
 
     gc.collect()
@@ -203,7 +205,7 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # MAP EXTENT — computed before any plotting
+    # MAP EXTENT — defined ONCE here, not duplicated below
     # --------------------------------------------------------
 
     xmin = site_point.x - 1600
@@ -216,21 +218,19 @@ def generate_transport(data_type: str, value: str,
 
     # --------------------------------------------------------
     # PLOT SETUP
-    # CRITICAL ORDER: set xlim/ylim BEFORE cx.add_basemap so
+    # CRITICAL: set xlim/ylim BEFORE cx.add_basemap so
     # contextily fetches tiles at the correct location and zoom.
-    # geopandas .plot() calls will reset limits — re-lock after
-    # all layers are drawn.
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    # Step 1 — lock extent
+    # Step 1 — lock extent FIRST
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    # Step 2 — basemap (uses locked extent to fetch correct tiles)
+    # Step 2 — basemap uses locked extent to fetch correct tiles
     cx.add_basemap(ax, crs="EPSG:3857",
                    source=cx.providers.CartoDB.Positron,
                    zoom=15, alpha=0.5)
@@ -241,27 +241,16 @@ def generate_transport(data_type: str, value: str,
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-
+    if not water.empty:                                      # ← RESTORED
+        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
     if not roads.empty:
         roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
-
-    # --------------------------------------------------------
-    # MAP EXTENT
-    # --------------------------------------------------------
-
-    xmin = site_point.x - 1600
-    xmax = site_point.x + 2200
-    ymin = site_point.y - 1100
-    ymax = site_point.y + 1100
-
-    clip_box = box(xmin, ymin, xmax, ymax)
-    clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
     # --------------------------------------------------------
     # MTR ROUTES — per-line coloring
     # --------------------------------------------------------
 
-    lines_on_map = {}   # color → label, for legend
+    lines_on_map = {}
 
     if not mtr_routes.empty:
 
@@ -286,7 +275,6 @@ def generate_transport(data_type: str, value: str,
                     subset.plot(ax=ax, color="white",    linewidth=8,   zorder=4)
                     subset.plot(ax=ax, color=line_color, linewidth=4.5, zorder=5)
 
-                    # Track for legend
                     if line_color not in lines_on_map:
                         official_label = clean_name.title()
                         for key, c, label in MTR_LEGEND_LINES:
@@ -295,7 +283,6 @@ def generate_transport(data_type: str, value: str,
                                 break
                         lines_on_map[line_color] = official_label
 
-                    # Line label annotation
                     merged = subset.union_all()
                     if merged.length < 600:
                         continue
@@ -321,7 +308,6 @@ def generate_transport(data_type: str, value: str,
                                       alpha=0.85, pad=2)
                         )
 
-                # Unnamed routes fallback
                 unnamed = mtr_visible[mtr_visible[name_col].isna()]
                 if not unnamed.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
@@ -332,7 +318,7 @@ def generate_transport(data_type: str, value: str,
                 mtr_visible.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
 
     # --------------------------------------------------------
-    # LIGHT RAIL — official yellow
+    # LIGHT RAIL
     # --------------------------------------------------------
 
     if not light_rail.empty:
@@ -340,14 +326,13 @@ def generate_transport(data_type: str, value: str,
         light_rail.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
 
     # --------------------------------------------------------
-    # STATIONS — MTR logo, deduplicated + station name label
+    # STATIONS
     # --------------------------------------------------------
 
     if not stations.empty:
         station_pts = stations.copy()
         station_pts["geometry"] = station_pts.centroid
 
-        # Filter to map extent
         station_pts = station_pts[
             (station_pts.geometry.x >= xmin) & (station_pts.geometry.x <= xmax) &
             (station_pts.geometry.y >= ymin) & (station_pts.geometry.y <= ymax)
@@ -359,7 +344,6 @@ def generate_transport(data_type: str, value: str,
             sx, sy     = row.geometry.x, row.geometry.y
             current_pt = Point(sx, sy)
 
-            # Skip if too close to an already-placed station
             too_close = any(
                 current_pt.distance(p) < STATION_MIN_DISTANCE
                 for p in placed_station_positions
@@ -369,7 +353,6 @@ def generate_transport(data_type: str, value: str,
 
             placed_station_positions.append(current_pt)
 
-            # Determine fallback color
             fallback_color = "#ED1D24"
             name_val = row.get("name", None)
             if isinstance(name_val, str) and name_val.strip():
@@ -392,7 +375,6 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
-            # Station name label below icon
             if isinstance(name_val, str) and name_val.strip():
                 display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
                 if display_name:
