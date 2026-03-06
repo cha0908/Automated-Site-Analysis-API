@@ -434,22 +434,14 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site — white halo + red fill, label above ────────────────────────────
+    # ── Site — red fill with SITE label centered on polygon ──────────────────
     try:
         sc = site_geom.centroid
-        # White halo so the site stands out from background
-        halo_gdf = gpd.GeoDataFrame(geometry=[site_geom.buffer(25)], crs=3857)
-        halo_gdf.plot(ax=ax, facecolor="white", edgecolor="none",
-                      linewidth=0, zorder=14, alpha=0.85)
-        # Red fill
-        site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred",
-                      linewidth=2.0, zorder=15)
-        # Simple label just above the site centroid
-        ax.text(sc.x, sc.y + 55, "SITE",
-                color="white", weight="bold", fontsize=9,
-                ha="center", va="bottom", zorder=16,
-                bbox=dict(facecolor="#e53935", edgecolor="none",
-                          alpha=1.0, pad=3))
+        site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="white",
+                      linewidth=2.5, zorder=15)
+        ax.text(sc.x, sc.y, "SITE",
+                color="white", weight="bold", fontsize=8,
+                ha="center", va="center", zorder=16)
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
