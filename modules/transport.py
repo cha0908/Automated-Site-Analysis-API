@@ -150,6 +150,7 @@ def generate_transport(data_type: str, value: str,
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     r = radius_m if radius_m is not None else MAP_RADIUS
     lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
+
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
@@ -204,24 +205,7 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT
-    # --------------------------------------------------------
-
-    fig, ax = plt.subplots(figsize=(18, 10))
-    fig.patch.set_facecolor("#f4f4f4")
-    ax.set_facecolor("#f4f4f4")
-
-    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=15, alpha=0.5)
-
-    if not buildings.empty:
-        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-    if not water.empty:
-        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
-    if not roads.empty:
-        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
-
-    # --------------------------------------------------------
-    # MAP EXTENT
+    # MAP EXTENT — computed before any plotting
     # --------------------------------------------------------
 
     xmin = site_point.x - 1600
@@ -231,6 +215,38 @@ def generate_transport(data_type: str, value: str,
 
     clip_box = box(xmin, ymin, xmax, ymax)
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
+
+    # --------------------------------------------------------
+    # PLOT SETUP
+    # CRITICAL ORDER: set xlim/ylim BEFORE cx.add_basemap so
+    # contextily fetches tiles at the correct location and zoom.
+    # geopandas .plot() calls will reset limits — re-lock after
+    # all layers are drawn.
+    # --------------------------------------------------------
+
+    fig, ax = plt.subplots(figsize=(18, 10))
+    fig.patch.set_facecolor("#f4f4f4")
+    ax.set_facecolor("#f4f4f4")
+
+    # Step 1 — lock extent
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    # Step 2 — basemap (uses locked extent to fetch correct tiles)
+    cx.add_basemap(ax, crs="EPSG:3857",
+                   source=cx.providers.CartoDB.Positron,
+                   zoom=15, alpha=0.5)
+
+    # --------------------------------------------------------
+    # BASE LAYERS
+    # --------------------------------------------------------
+
+    if not buildings.empty:
+        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
+    if not water.empty:
+        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+    if not roads.empty:
+        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
 
     # --------------------------------------------------------
     # MTR ROUTES — per-line coloring
@@ -270,7 +286,7 @@ def generate_transport(data_type: str, value: str,
                                 break
                         lines_on_map[line_color] = official_label
 
-                    # ── FIX 1: Line label — prefix "MTR " to match Colab output ──
+                    # Line label annotation
                     merged = subset.union_all()
                     if merged.length < 600:
                         continue
@@ -287,7 +303,7 @@ def generate_transport(data_type: str, value: str,
                     if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
                         ax.text(
                             new_point.x, new_point.y,
-                            f"MTR {clean_name.upper()}",   # ← FIXED: matches Colab
+                            f"MTR {clean_name.upper()}",
                             fontsize=9, weight="bold",
                             color=line_color,
                             ha="center", va="center",
@@ -367,7 +383,7 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
-            # ── FIX 2: Station name label below icon — matches Colab output ──
+            # Station name label below icon
             if isinstance(name_val, str) and name_val.strip():
                 display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
                 if display_name:
@@ -410,26 +426,22 @@ def generate_transport(data_type: str, value: str,
             ha='center', va='bottom', fontsize=12)
 
     # --------------------------------------------------------
-    # EXTENT  — FIX 3: remove ax.set_aspect("equal") — Colab does not set it
+    # RE-LOCK EXTENT — geopandas .plot() resets limits after each call
     # --------------------------------------------------------
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    # NOTE: ax.set_aspect("equal") intentionally removed — it overrides xlim/ylim
-    # and causes map distortion on non-square extents (1600+2200 × 2200)
 
     # --------------------------------------------------------
-    # LEGEND — FIX 4: bbox_to_anchor matches Colab (0.02, 0.02)
+    # LEGEND
     # --------------------------------------------------------
 
     legend_handles = []
 
-    # Light Rail
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail")
     )
 
-    # MTR lines on map — official order, deduplicated by color
     seen_colors_legend = set()
     for key, color, label in MTR_LEGEND_LINES:
         if color in lines_on_map and color not in seen_colors_legend:
@@ -438,17 +450,13 @@ def generate_transport(data_type: str, value: str,
             )
             seen_colors_legend.add(color)
 
-    # Vehicle Circulation
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation")
     )
-
-    # Site
     legend_handles.append(
         mpatches.Patch(facecolor=COLOR_SITE, label="Site")
     )
 
-    # MTR Station — logo thumbnail or fallback circle
     if MTR_LOGO_LOADED and _mtr_img is not None:
         pil_thumb = Image.fromarray(
             ((_mtr_img * 255).astype(np.uint8)
@@ -492,7 +500,7 @@ def generate_transport(data_type: str, value: str,
         handles=legend_handles,
         handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
         loc="lower left",
-        bbox_to_anchor=(0.02, 0.02),   # ← FIXED: matches Colab
+        bbox_to_anchor=(0.02, 0.02),
         frameon=True,
         facecolor="white",
         edgecolor="black",
@@ -518,8 +526,8 @@ def generate_transport(data_type: str, value: str,
     ax.set_axis_off()
 
     buffer = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=200,
+                bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     gc.collect()
 
