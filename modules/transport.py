@@ -13,6 +13,7 @@ import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import matplotlib.legend_handler as lh
 import numpy as np
+import pandas as pd
 
 from shapely.geometry import Point, box
 from io import BytesIO
@@ -30,7 +31,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 MAP_RADIUS           = 3000
 COLOR_ROADS          = "#e85d9e"
-COLOR_WATER          = "#6fa8dc"   # ← RESTORED: was removed in boss merge
+COLOR_WATER          = "#6fa8dc"
 COLOR_BUILDINGS      = "#d6d6d6"
 COLOR_SITE           = "#FF0000"
 COLOR_LIGHT_RAIL     = "#D3A809"
@@ -138,6 +139,50 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 
 
 # ============================================================
+# SAFE MTR ROUTE FETCH
+# Fetches rail/subway features using multiple tag passes and
+# merges results — captures tunnel segments and named routes
+# that a single query may miss.
+# ============================================================
+
+def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
+    """
+    Fetch all MTR/rail route geometries robustly.
+    Uses three separate OSM queries and concatenates results,
+    deduplicating by osmid to avoid double-rendering.
+    """
+    frames = []
+
+    tag_sets = [
+        {"railway": "rail"},           # surface + tunnel rail (Island, East Rail, etc.)
+        {"railway": "subway"},         # subway-tagged lines
+        {"railway": "monorail"},       # future-proof
+    ]
+
+    for tags in tag_sets:
+        try:
+            gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
+            if not gdf.empty:
+                # Keep only LineString / MultiLineString geometry types
+                gdf = gdf[gdf.geometry.type.isin(["LineString", "MultiLineString"])]
+                if not gdf.empty:
+                    frames.append(gdf.to_crs(3857))
+        except Exception:
+            continue
+
+    if not frames:
+        return gpd.GeoDataFrame(geometry=[], crs=3857)
+
+    combined = pd.concat(frames)
+
+    # Deduplicate by osmid index level if present
+    if combined.index.names and combined.index.names[0] is not None:
+        combined = combined[~combined.index.duplicated(keep="first")]
+
+    return combined.reset_index(drop=False)
+
+
+# ============================================================
 # MAIN GENERATOR
 # ============================================================
 
@@ -179,15 +224,17 @@ def generate_transport(data_type: str, value: str,
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
     # --------------------------------------------------------
-    # FETCH DATA  ← water fetch RESTORED (removed in boss merge)
+    # FETCH DATA
     # --------------------------------------------------------
 
     buildings  = safe_fetch({"building": True})
     roads      = keep_lines(safe_fetch({"highway": ["motorway", "trunk", "primary", "secondary"]}))
     light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
     stations   = safe_fetch({"railway": "station"})
-    water      = safe_fetch({"natural": "water"})   # ← RESTORED
-    mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
+    water      = safe_fetch({"natural": "water"})
+
+    # ── FIX: use robust multi-pass fetch that captures tunnel rail ──
+    mtr_routes = _fetch_mtr_routes(lat, lon, r)
 
     gc.collect()
 
@@ -205,21 +252,27 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # MAP EXTENT — defined ONCE here, not duplicated below
+    # MAP EXTENT
+    # ── FIX: symmetric extent so site stays centred and MTR
+    #    lines on all sides are captured in clip_box.
+    #    Original asymmetric (-1600 / +2200) was shifting the
+    #    viewport east and cutting western/central MTR lines.
     # --------------------------------------------------------
 
-    xmin = site_point.x - 1600
-    xmax = site_point.x + 2200
-    ymin = site_point.y - 1100
-    ymax = site_point.y + 1100
+    HALF_W = 1900   # half-width  → total width  3800 m
+    HALF_H = 1100   # half-height → total height 2200 m
+
+    xmin = site_point.x - HALF_W
+    xmax = site_point.x + HALF_W
+    ymin = site_point.y - HALF_H
+    ymax = site_point.y + HALF_H
 
     clip_box = box(xmin, ymin, xmax, ymax)
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
     # --------------------------------------------------------
     # PLOT SETUP
-    # CRITICAL: set xlim/ylim BEFORE cx.add_basemap so
-    # contextily fetches tiles at the correct location and zoom.
+    # CRITICAL: set xlim/ylim BEFORE cx.add_basemap
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
@@ -241,7 +294,7 @@ def generate_transport(data_type: str, value: str,
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-    if not water.empty:                                      # ← RESTORED
+    if not water.empty:
         water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
     if not roads.empty:
         roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
@@ -417,7 +470,7 @@ def generate_transport(data_type: str, value: str,
             ha='center', va='bottom', fontsize=12)
 
     # --------------------------------------------------------
-    # RE-LOCK EXTENT — geopandas .plot() resets limits after each call
+    # RE-LOCK EXTENT
     # --------------------------------------------------------
 
     ax.set_xlim(xmin, xmax)
