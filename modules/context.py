@@ -10,7 +10,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, ALL_COMPLETED
 from typing import Optional
 from shapely.geometry import Point
 from io import BytesIO
@@ -19,30 +19,27 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 from modules.resolver import resolve_location, get_lot_boundary
 
+# Per-request OSMnx timeout — short so each fetch fails fast if slow
 ox.settings.use_cache        = True
 ox.settings.log_console      = False
-ox.settings.requests_timeout = 20
+ox.settings.requests_timeout = 18
 
 log = logging.getLogger(__name__)
 
 FETCH_RADIUS     = 800
 MAP_HALF_SIZE    = 600
 MTR_COLOR        = "#ffd166"
-WALK_ROUTE_COLOR = "#005eff"
-FETCH_TIMEOUT    = 30   # per-task wall-clock timeout in seconds
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
 _BUS_ICON_PATH = os.path.join(_STATIC_DIR, "bus.png")
-try:
-    _bus_icon = mpimg.imread(_BUS_ICON_PATH)
-except Exception:
-    _bus_icon = None
+try:    _bus_icon = mpimg.imread(_BUS_ICON_PATH)
+except: _bus_icon = None
 
 _MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
 try:
     _mtr_logo        = mpimg.imread(_MTR_LOGO_PATH)
     _MTR_LOGO_LOADED = True
-except Exception:
+except:
     _mtr_logo        = None
     _MTR_LOGO_LOADED = False
 
@@ -137,15 +134,44 @@ def wrap_label(text, width=18):
     return "\n".join(textwrap.wrap(str(text), width))
 
 
-def _fetch(lat, lon, dist, tags) -> gpd.GeoDataFrame:
+def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
     """Single OSMnx fetch — returns empty GDF on any failure."""
     try:
         gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
         if gdf is not None and not gdf.empty:
             return gdf.to_crs(3857)
     except Exception as e:
-        log.debug(f"[context] fetch {list(tags)[:2]}: {e}")
+        log.debug(f"[context] fetch {list(tags.keys())[:2]}: {e}")
     return _EMPTY.copy()
+
+
+def _parallel_fetch(tasks: dict, wall_timeout: float = 55) -> dict:
+    """
+    Run fetch tasks in parallel.
+    tasks = {key: (lat, lon, dist, tags), ...}
+    Returns {key: GeoDataFrame} — missing keys get empty GDF.
+    Hard wall-clock timeout so we never exceed Render's request limit.
+    """
+    results = {k: _EMPTY.copy() for k in tasks}
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        futures = {pool.submit(_fetch_one, *args): key
+                   for key, args in tasks.items()}
+        done, not_done = wait(futures, timeout=wall_timeout,
+                              return_when=ALL_COMPLETED)
+        # Cancel anything still running
+        for f in not_done:
+            f.cancel()
+            key = futures[f]
+            log.warning(f"[context] timeout: {key}")
+        # Collect completed
+        for f in done:
+            key = futures[f]
+            try:
+                results[key] = f.result()
+                log.info(f"[context] ✓ {key}: {len(results[key])} rows")
+            except Exception as e:
+                log.warning(f"[context] ✗ {key}: {e}")
+    return results
 
 
 def _col(gdf, col):
@@ -239,15 +265,15 @@ def generate_context(
     cfg       = TYPE_CONFIG.get(SITE_TYPE, TYPE_CONFIG["MIXED"])
     log.info(f"[context] zone={zone} site_type={SITE_TYPE}")
 
-    # ── Parallel fetch ────────────────────────────────────────────────────────
-    # All OSMnx calls run at the same time — total time = slowest single fetch
-    log.info("[context] Parallel fetching all layers...")
-
-    tasks = {
-        "base":     (lat, lon, fetch_r,  {"landuse": True,
-                                           "leisure": ["park", "playground",
-                                                       "garden", "recreation_ground"]}),
-        "schools":  (lat, lon, fetch_r,  {"amenity": ["school", "college", "university"]}),
+    # ── Parallel fetch — hard 55s wall-clock limit ────────────────────────────
+    log.info("[context] Fetching (parallel, 55s limit)...")
+    results = _parallel_fetch({
+        "base":     (lat, lon, fetch_r,
+                     {"landuse": True,
+                      "leisure": ["park", "playground", "garden",
+                                  "recreation_ground"]}),
+        "schools":  (lat, lon, fetch_r,
+                     {"amenity": ["school", "college", "university"]}),
         "similar":  (lat, lon, fetch_r,  cfg["similar_tags"]),
         "support":  (lat, lon, fetch_r,  cfg["support_tags"]),
         "stations": (lat, lon, 1500,     {"railway": "station"}),
@@ -256,27 +282,7 @@ def generate_context(
                      {"amenity": ["school", "college", "university", "hospital"],
                       "leisure": ["park"],
                       "place":   ["neighbourhood", "suburb"]}),
-    }
-
-    results = {}
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {pool.submit(_fetch, *args): key
-                   for key, args in tasks.items()}
-        for future in as_completed(futures, timeout=90):
-            key = futures[future]
-            try:
-                results[key] = future.result()
-                log.info(f"[context] ✓ {key}: {len(results[key])} rows")
-            except Exception as e:
-                log.warning(f"[context] ✗ {key}: {e}")
-                results[key] = _EMPTY.copy()
-
-    # Fill any that timed out
-    for key in tasks:
-        if key not in results:
-            log.warning(f"[context] timed out: {key}")
-            results[key] = _EMPTY.copy()
-
+    }, wall_timeout=55)
     gc.collect()
 
     # ── Process base ──────────────────────────────────────────────────────────
@@ -289,13 +295,13 @@ def generate_context(
     schools      = results["schools"]
     similar_blds = _polys_only(results["similar"])
     support_blds = _polys_only(results["support"])
+    labels_raw   = results["labels"]
     bus_stops_raw = results["bus"]
-    labels_raw    = results["labels"]
 
     # ── Process stations ──────────────────────────────────────────────────────
     stations_raw     = results["stations"]
-    stations         = _EMPTY.copy()
     stations_in_view = _EMPTY.copy()
+    stations         = _EMPTY.copy()
 
     if not stations_raw.empty:
         s             = stations_raw.copy()
@@ -306,13 +312,12 @@ def generate_context(
         stations_in_view = stations[stations["dist"] <= half_size * 1.3]
 
     # ── Process bus stops ─────────────────────────────────────────────────────
-    bus_stops = bus_stops_raw
+    bus_stops = bus_stops_raw.copy() if not bus_stops_raw.empty else _EMPTY.copy()
     if len(bus_stops) > 6:
         try:
             from sklearn.cluster import KMeans
             coords = np.array([[g.centroid.x, g.centroid.y]
                                 for g in bus_stops.geometry])
-            bus_stops = bus_stops.copy()
             bus_stops["cluster"] = KMeans(
                 n_clusters=6, random_state=0).fit(coords).labels_
             bus_stops = gpd.GeoDataFrame(
@@ -320,7 +325,7 @@ def generate_context(
         except Exception:
             bus_stops = bus_stops.head(6)
 
-    # ── Process labels ────────────────────────────────────────────────────────
+    # ── Place labels ──────────────────────────────────────────────────────────
     all_label_items = []
     seen_texts      = set()
 
@@ -343,7 +348,6 @@ def generate_context(
 
     for src in [labels_raw, schools, parks, similar_blds, support_blds]:
         _collect(src)
-
     all_label_items.sort(key=lambda x: x[0])
     all_label_items = [(g, t) for _, g, t in all_label_items[:35]]
 
@@ -382,8 +386,7 @@ def generate_context(
     _safe_plot(support_blds,     ax, color=cfg["support_color"],   alpha=0.60, zorder=3)
     _safe_plot(similar_blds,     ax, color=cfg["highlight_color"], alpha=0.80, zorder=4)
 
-    del residential_area, industrial_area, parks, schools
-    del support_blds, similar_blds
+    del residential_area, industrial_area, parks, schools, support_blds, similar_blds
     gc.collect()
 
     # ── Bus stops ─────────────────────────────────────────────────────────────
@@ -479,23 +482,23 @@ def generate_context(
     )
 
     # ── Legend ────────────────────────────────────────────────────────────────
-    handles = [
-        mpatches.Patch(color="#f2c6a0",              label="Residential Area"),
-        mpatches.Patch(color="#b39ddb",              label="Industrial / Commercial Area"),
-        mpatches.Patch(color="#b7dfb9",              label="Public Park"),
-        mpatches.Patch(color="#9ecae1",              label="School / Institution"),
-        mpatches.Patch(color=cfg["highlight_color"], alpha=0.80,
-                       label=cfg["highlight_label"]),
-        mpatches.Patch(color=cfg["support_color"],   alpha=0.60,
-                       label=cfg["support_label"]),
-        mpatches.Patch(color=MTR_COLOR,              label="MTR Station"),
-        mpatches.Patch(color="#e53935",              label="Site"),
-        mpatches.Patch(color="#0d47a1",              label="Bus Stop"),
-    ]
-
-    ax.legend(handles=handles, loc="lower left",
-              bbox_to_anchor=(0.02, 0.02),
-              fontsize=8.5, framealpha=0.95)
+    ax.legend(
+        handles=[
+            mpatches.Patch(color="#f2c6a0",              label="Residential Area"),
+            mpatches.Patch(color="#b39ddb",              label="Industrial / Commercial Area"),
+            mpatches.Patch(color="#b7dfb9",              label="Public Park"),
+            mpatches.Patch(color="#9ecae1",              label="School / Institution"),
+            mpatches.Patch(color=cfg["highlight_color"], alpha=0.80,
+                           label=cfg["highlight_label"]),
+            mpatches.Patch(color=cfg["support_color"],   alpha=0.60,
+                           label=cfg["support_label"]),
+            mpatches.Patch(color=MTR_COLOR,              label="MTR Station"),
+            mpatches.Patch(color="#e53935",              label="Site"),
+            mpatches.Patch(color="#0d47a1",              label="Bus Stop"),
+        ],
+        loc="lower left", bbox_to_anchor=(0.02, 0.02),
+        fontsize=8.5, framealpha=0.95,
+    )
 
     ax.set_title(
         f"Automated Site Context Analysis – {data_type} {value}",
