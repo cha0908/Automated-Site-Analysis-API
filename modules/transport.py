@@ -41,7 +41,6 @@ STATION_MIN_DISTANCE = 250
 STATION_LOGO_ZOOM    = 0.055
 
 COLOR_ROADS      = "#e85d9e"
-COLOR_WATER      = "#6fa8dc"
 COLOR_BUILDINGS  = "#d6d6d6"
 COLOR_SITE       = "#FF0000"
 COLOR_LIGHT_RAIL = "#D3A809"
@@ -77,8 +76,8 @@ MTR_LEGEND_LINES = [
 ]
 
 _LABEL_REMAP = {
-    "LANTAU AND AIRPORT RAILWAY":       "AIRPORT EXPRESS",
-    "GUANGZHOUSHEN EXPRESS RAIL LINK":  "EXPRESS RAIL LINK",
+    "LANTAU AND AIRPORT RAILWAY":      "AIRPORT EXPRESS",
+    "GUANGZHOUSHEN EXPRESS RAIL LINK": "EXPRESS RAIL LINK",
 }
 
 
@@ -124,7 +123,7 @@ def _draw_roundel(ax, x, y, size=60, color="#ED1D24", zorder=9):
                                 color="white", zorder=zorder + 1))
     ax.add_patch(plt.Circle((x, y), size * 0.55, color="white", zorder=zorder + 2))
     ax.add_patch(plt.Rectangle((x - bw/2, y - bh/2), bw, bh,
-                                color=color,  zorder=zorder + 3))
+                                color=color, zorder=zorder + 3))
 
 
 def draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM, fallback="#ED1D24", zorder=9):
@@ -141,7 +140,6 @@ def draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM, fallback="#ED1D24", zorder=9)
 # ── Geometry helpers ──────────────────────────────────────────────────────────
 
 def _extract_lines(geom):
-    """Recursively pull LineStrings out of any geometry type."""
     if geom is None or geom.is_empty:
         return None
     gt = geom.geom_type
@@ -165,7 +163,6 @@ def _extract_lines(geom):
 
 
 def _to_line_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """Convert any mixed-geometry GDF into one with only line geometries."""
     if gdf.empty:
         return gdf.copy()
     rows = []
@@ -216,7 +213,7 @@ def _flatten(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 
 def _clean_name(val) -> Optional[str]:
-    if val is None or (isinstance(val, float)):
+    if val is None or isinstance(val, float):
         return None
     if isinstance(val, (list, tuple)):
         val = next((v for v in val if v is not None), None)
@@ -240,7 +237,7 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
             flat = _flatten(raw)
             del raw
             gc.collect()
-            log.info(f"[transport] MTR {tags}: {len(flat)} rows, "
+            log.info(f"[transport] MTR {tags}: {len(flat)} rows "
                      f"types={flat.geometry.geom_type.value_counts().to_dict()}")
             line_gdf = _to_line_gdf(flat)
             del flat
@@ -255,7 +252,6 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
             gc.collect()
 
     if not frames:
-        log.warning("[transport] No MTR route data found")
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
     try:
@@ -275,9 +271,6 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
 
 
 # ── Main generator ────────────────────────────────────────────────────────────
-# Signature matches main.py call exactly:
-#   generate_transport, dt, v, lon, lat, lot_ids, extents
-# radius_m is an optional keyword at the end.
 
 def generate_transport(
     data_type: str,
@@ -305,7 +298,7 @@ def generate_transport(
         site_point = site_geom.centroid
     else:
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_geom  = site_point.buffer(40)
+        site_geom  = site_point.buffer(60)
         site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # ── Map extent ────────────────────────────────────────────────────────────
@@ -316,60 +309,33 @@ def generate_transport(
     clip_box = box(xmin, ymin, xmax, ymax)
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
-    # ── Fetch layers ──────────────────────────────────────────────────────────
-    log.info("[transport] Fetching buildings...")
-    _bld = _flatten(_safe_fetch(lat, lon, fetch_r, {"building": True}))
-    buildings = (_bld[_bld.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
-                 if not _bld.empty else gpd.GeoDataFrame(geometry=[], crs=3857))
-    del _bld
-    gc.collect()
+    # ── Fetch layers (NO water, NO buildings for speed) ───────────────────────
 
-    if lot_gdf is None and not buildings.empty:
-        try:
-            dists     = buildings.geometry.distance(site_point)
-            site_geom = buildings.loc[dists.idxmin(), "geometry"]
-            site_gdf  = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-        except Exception:
-            pass
-
+    # Roads — major roads only to reduce fetch size and clutter
     log.info("[transport] Fetching roads...")
     roads = _keep_lines(_flatten(_safe_fetch(lat, lon, fetch_r, {
-        "highway": ["motorway", "trunk", "primary", "secondary",
-                    "tertiary", "residential", "service", "unclassified"],
+        "highway": ["motorway", "trunk", "primary", "secondary"],
     })))
     gc.collect()
 
+    # Light rail
     log.info("[transport] Fetching light rail...")
     _lr        = _flatten(_safe_fetch(lat, lon, fetch_r, {"railway": "light_rail"}))
     light_rail = _to_line_gdf(_lr) if not _lr.empty else gpd.GeoDataFrame(geometry=[], crs=3857)
     del _lr
     gc.collect()
 
+    # MTR routes
     log.info("[transport] Fetching MTR routes...")
     mtr_routes = _fetch_mtr_routes(lat, lon, fetch_r)
     gc.collect()
 
+    # Stations
     log.info("[transport] Fetching stations...")
     stations = _flatten(_safe_fetch(lat, lon, fetch_r, {"railway": "station"}))
     gc.collect()
 
-    log.info("[transport] Fetching water...")
-    _wf = []
-    for wt in [{"natural": "water"}, {"natural": "bay"}]:
-        _w = _flatten(_safe_fetch(lat, lon, min(fetch_r, 2000), wt))
-        if not _w.empty:
-            _wf.append(_w[_w.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy())
-        del _w
-        gc.collect()
-    water = gpd.GeoDataFrame(
-        pd.concat(_wf, ignore_index=True) if _wf
-        else gpd.GeoDataFrame(geometry=[], crs=3857),
-        crs=3857,
-    )
-    del _wf
-    gc.collect()
-
-    log.info("[transport] Rendering map...")
+    log.info("[transport] All data fetched — rendering...")
 
     # ── Figure ────────────────────────────────────────────────────────────────
     fig, ax = plt.subplots(figsize=(18, 10))
@@ -378,30 +344,28 @@ def generate_transport(
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
+    # No-label basemap tile
     try:
-        cx.add_basemap(ax, crs="EPSG:3857",
-                       source=cx.providers.CartoDB.Positron,
-                       zoom=15, alpha=0.5)
-    except Exception as e:
-        log.warning(f"[transport] basemap failed: {e}")
-
-    # ── Base layers ───────────────────────────────────────────────────────────
-    if not buildings.empty:
+        cx.add_basemap(
+            ax,
+            crs="EPSG:3857",
+            source="https://tiles.stadiamaps.com/tiles/stamen_toner_background/{z}/{x}/{y}.png",
+            zoom=14,
+            alpha=0.08,
+        )
+    except Exception:
         try:
-            buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-        except Exception:
-            pass
-    del buildings
-    gc.collect()
+            cx.add_basemap(
+                ax,
+                crs="EPSG:3857",
+                source=cx.providers.CartoDB.PositronNoLabels,
+                zoom=14,
+                alpha=0.4,
+            )
+        except Exception as e:
+            log.warning(f"[transport] basemap failed: {e}")
 
-    if not water.empty:
-        try:
-            water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
-        except Exception:
-            pass
-    del water
-    gc.collect()
-
+    # ── Roads ─────────────────────────────────────────────────────────────────
     if not roads.empty:
         try:
             rc = gpd.clip(roads, clip_gdf)
@@ -474,11 +438,12 @@ def generate_transport(
                         except Exception as le:
                             log.debug(f"[transport] label error '{cname}': {le}")
 
-                    if not unnamed.empty:
+                    # Only draw unnamed if there are NO named lines at all
+                    # (avoids the generic "MTR" legend entry for duplicates)
+                    if not unnamed.empty and named.empty:
                         unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                         unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
-                        if DEFAULT_MTR_COLOR not in lines_on_map:
-                            lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
+                        lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
 
         except Exception as e:
             log.warning(f"[transport] MTR render error: {e}")
@@ -517,8 +482,8 @@ def generate_transport(
                 if any(pt.distance(p) < STATION_MIN_DISTANCE for p in placed_pts):
                     continue
                 placed_pts.append(pt)
-                fb      = "#ED1D24"
-                name_s  = _clean_name(row.get("name"))
+                fb     = "#ED1D24"
+                name_s = _clean_name(row.get("name"))
                 if name_s:
                     c = get_mtr_color(name_s)
                     if c != DEFAULT_MTR_COLOR:
@@ -535,15 +500,15 @@ def generate_transport(
     del stations
     gc.collect()
 
-    # ── Site ──────────────────────────────────────────────────────────────────
+    # ── Site — drawn last so always on top ────────────────────────────────────
     try:
         site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="white",
                       linewidth=2, zorder=13)
         centroid = site_geom.centroid
-        ax.text(centroid.x, centroid.y - 130, "SITE",
+        ax.text(centroid.x, centroid.y - 150, "SITE",
                 fontsize=14, weight="bold", color="black",
                 ha="center", va="top", zorder=14,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=3))
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=3))
     except Exception as e:
         log.warning(f"[transport] Site render error: {e}")
 
@@ -572,7 +537,8 @@ def generate_transport(
                 mlines.Line2D([], [], color=color, linewidth=4, label=label))
             seen_lc.add(color)
 
-    if DEFAULT_MTR_COLOR in lines_on_map and DEFAULT_MTR_COLOR not in seen_lc:
+    # Only add generic MTR if no named lines were found at all
+    if DEFAULT_MTR_COLOR in lines_on_map and DEFAULT_MTR_COLOR not in seen_lc and not seen_lc:
         legend_handles.append(
             mlines.Line2D([], [], color=DEFAULT_MTR_COLOR, linewidth=4, label="MTR"))
 
