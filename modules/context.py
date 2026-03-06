@@ -267,10 +267,12 @@ def generate_context(
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
         site_point = site_geom.centroid
+        log.info(f"[context] lot boundary: {site_geom.geom_type} area={site_geom.area:.0f}m²")
     else:
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_geom  = site_point.buffer(60)
+        site_geom  = site_point.buffer(80)   # 80m radius — clearly visible
         site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
+        log.info("[context] using fallback buffer for site")
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -283,23 +285,22 @@ def generate_context(
     cfg       = TYPE_CONFIG.get(SITE_TYPE, TYPE_CONFIG["MIXED"])
     log.info(f"[context] zone={zone} site_type={SITE_TYPE}")
 
-    # ── Parallel fetch — hard 55s wall-clock limit ────────────────────────────
-    log.info("[context] Fetching (parallel, 55s limit)...")
+    # ── Parallel fetch — 5 tasks, 110s wall-clock limit ──────────────────────
+    log.info("[context] Fetching (parallel, 110s limit)...")
     results = _parallel_fetch({
+        # One merged fetch: landuse + leisure + amenity + stations + labels
         "base":     (lat, lon, fetch_r,
                      {"landuse": True,
                       "leisure": ["park", "playground", "garden",
-                                  "recreation_ground"]}),
-        "schools":  (lat, lon, fetch_r,
-                     {"amenity": ["school", "college", "university"]}),
+                                  "recreation_ground"],
+                      "amenity": ["school", "college", "university",
+                                  "hospital"],
+                      "railway": ["station"],
+                      "place":   ["neighbourhood", "suburb"]}),
         "similar":  (lat, lon, fetch_r,  cfg["similar_tags"]),
         "support":  (lat, lon, fetch_r,  cfg["support_tags"]),
-        "stations": (lat, lon, 1500,     {"railway": "station"}),
-        "bus":      (lat, lon, 700,      {"highway": "bus_stop"}),
-        "labels":   (lat, lon, min(fetch_r, 600),
-                     {"amenity": ["school", "college", "university", "hospital"],
-                      "leisure": ["park"],
-                      "place":   ["neighbourhood", "suburb"]}),
+        "bus":      (lat, lon, 600,      {"highway": "bus_stop"}),
+        "stations": (lat, lon, 1200,     {"railway": "station"}),
     }, wall_timeout=110)
     gc.collect()
 
@@ -308,12 +309,14 @@ def generate_context(
     residential_area = _filter_col(base, "landuse", "residential")
     industrial_area  = _filter_col(base, "landuse", ["industrial", "commercial"])
     parks            = _filter_col(base, "leisure", "park")
+    # Schools and labels come from base (merged fetch)
+    schools          = _filter_col(base, "amenity",
+                                   ["school", "college", "university"])
+    labels_raw       = base   # use full base for label collection
     del base
 
-    schools      = results["schools"]
-    similar_blds = _polys_only(results["similar"])
-    support_blds = _polys_only(results["support"])
-    labels_raw   = results["labels"]
+    similar_blds  = _polys_only(results["similar"])
+    support_blds  = _polys_only(results["support"])
     bus_stops_raw = results["bus"]
 
     # ── Process stations ──────────────────────────────────────────────────────
