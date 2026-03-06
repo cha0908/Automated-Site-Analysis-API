@@ -276,8 +276,20 @@ def generate_context(
         if not bs.empty:
             bus_stops_gdf = bs
 
-    # Similar buildings — polygons only, clipped to view
-    similar_blds = _polys_only(results["similar"])
+    # Similar buildings — named, significant size only (no tiny generic buildings)
+    _sim_raw = _polys_only(results["similar"])
+    if not _sim_raw.empty:
+        # Only keep buildings with an English/ASCII name
+        _sim_raw["_name"] = _get_name(_sim_raw)
+        _sim_named = _sim_raw[_sim_raw["_name"].apply(
+            lambda x: bool(_ascii_only(str(x))) if pd.notna(x) else False
+        )].copy()
+        # Minimum area: ~300m² (filters out tiny row houses / single units)
+        _sim_named = _sim_named[_sim_named.geometry.area >= 300]
+        similar_blds = _sim_named if not _sim_named.empty else _EMPTY.copy()
+        log.info(f"[context] similar after name+area filter: {len(similar_blds)} rows")
+    else:
+        similar_blds = _EMPTY.copy()
 
     # ── Process stations ──────────────────────────────────────────────────────
     stations_raw     = results["stations"]
@@ -406,13 +418,23 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site — drawn last, always on top ─────────────────────────────────────
+    # ── Site — halo + fill so tiny lots are always visible ───────────────────
     try:
+        sc = site_geom.centroid
+        # White halo ring (drawn first, behind the red fill)
+        halo = site_geom.buffer(30)
+        halo_gdf = gpd.GeoDataFrame(geometry=[halo], crs=3857)
+        halo_gdf.plot(ax=ax, facecolor="white", edgecolor="white",
+                      linewidth=0, zorder=14, alpha=0.9)
+        # Red site polygon
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred",
                       linewidth=2.5, zorder=15)
-        sc = site_geom.centroid
-        ax.text(sc.x, sc.y, "SITE", color="white", weight="bold",
-                fontsize=10, ha="center", va="center", zorder=16)
+        # SITE label with white bbox so it's readable over buildings
+        ax.text(sc.x, sc.y - site_geom.bounds[3] + sc.y - 50,
+                "SITE", color="white", weight="bold",
+                fontsize=9, ha="center", va="top", zorder=16,
+                bbox=dict(facecolor="#e53935", edgecolor="none",
+                          alpha=0.9, pad=2, boxstyle="round"))
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
