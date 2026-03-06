@@ -82,7 +82,7 @@ def get_mtr_color(name: str) -> str:
 
 
 # ============================================================
-# LOAD MTR LOGO — same pattern as driving.py
+# LOAD MTR LOGO
 # ============================================================
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -117,7 +117,7 @@ def _draw_roundel_fallback(ax, x, y, size=60, color="#ED1D24", zorder=9):
 
 
 # ============================================================
-# DRAW STATION — same pattern as driving.py _add_mtr_icon
+# DRAW STATION
 # ============================================================
 
 def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
@@ -141,7 +141,6 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 # MAIN GENERATOR
 # ============================================================
 
-# ── Main generator ────────────────────────────────────────────
 def generate_transport(data_type: str, value: str,
                        radius_m: Optional[int] = None,
                        lon: float = None, lat: float = None,
@@ -271,7 +270,7 @@ def generate_transport(data_type: str, value: str,
                                 break
                         lines_on_map[line_color] = official_label
 
-                    # Line label annotation
+                    # ── FIX 1: Line label — prefix "MTR " to match Colab output ──
                     merged = subset.union_all()
                     if merged.length < 600:
                         continue
@@ -288,7 +287,7 @@ def generate_transport(data_type: str, value: str,
                     if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
                         ax.text(
                             new_point.x, new_point.y,
-                            clean_name.upper(),
+                            f"MTR {clean_name.upper()}",   # ← FIXED: matches Colab
                             fontsize=9, weight="bold",
                             color=line_color,
                             ha="center", va="center",
@@ -316,7 +315,7 @@ def generate_transport(data_type: str, value: str,
         light_rail.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
 
     # --------------------------------------------------------
-    # STATIONS — MTR logo, deduplicated to prevent overlap
+    # STATIONS — MTR logo, deduplicated + station name label
     # --------------------------------------------------------
 
     if not stations.empty:
@@ -368,6 +367,21 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
+            # ── FIX 2: Station name label below icon — matches Colab output ──
+            if isinstance(name_val, str) and name_val.strip():
+                display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
+                if display_name:
+                    ax.text(
+                        sx, sy - 130,
+                        display_name,
+                        fontsize=7.5, weight="bold",
+                        ha="center", va="top",
+                        color="#333333",
+                        zorder=10,
+                        bbox=dict(facecolor="white", edgecolor="none",
+                                  alpha=0.7, pad=1.5)
+                    )
+
     # --------------------------------------------------------
     # SITE
     # --------------------------------------------------------
@@ -396,15 +410,16 @@ def generate_transport(data_type: str, value: str,
             ha='center', va='bottom', fontsize=12)
 
     # --------------------------------------------------------
-    # EXTENT
+    # EXTENT  — FIX 3: remove ax.set_aspect("equal") — Colab does not set it
     # --------------------------------------------------------
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    ax.set_aspect("equal")
+    # NOTE: ax.set_aspect("equal") intentionally removed — it overrides xlim/ylim
+    # and causes map distortion on non-square extents (1600+2200 × 2200)
 
     # --------------------------------------------------------
-    # LEGEND — small, clean, deduplicated, ordered
+    # LEGEND — FIX 4: bbox_to_anchor matches Colab (0.02, 0.02)
     # --------------------------------------------------------
 
     legend_handles = []
@@ -435,7 +450,6 @@ def generate_transport(data_type: str, value: str,
 
     # MTR Station — logo thumbnail or fallback circle
     if MTR_LOGO_LOADED and _mtr_img is not None:
-        # Use PIL to resize for legend thumbnail
         pil_thumb = Image.fromarray(
             ((_mtr_img * 255).astype(np.uint8)
              if _mtr_img.dtype != np.uint8 else _mtr_img)
@@ -478,7 +492,7 @@ def generate_transport(data_type: str, value: str,
         handles=legend_handles,
         handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
         loc="lower left",
-        bbox_to_anchor=(0.02, 0.15),
+        bbox_to_anchor=(0.02, 0.02),   # ← FIXED: matches Colab
         frameon=True,
         facecolor="white",
         edgecolor="black",
