@@ -1,3 +1,4 @@
+import logging
 import os
 import osmnx as ox
 import geopandas as gpd
@@ -13,7 +14,6 @@ from io import BytesIO
 import matplotlib.image as mpimg
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
-# ✅ UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 from modules.driving import _add_mtr_icon
 
@@ -61,18 +61,18 @@ def context_rules(site_type):
 # MAIN GENERATOR
 # ------------------------------------------------------------
 
-def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, radius_m:Optional[int] = None):
+def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame,
+                     radius_m: Optional[int] = None,
+                     lon: float = None, lat: float = None,
+                     lot_ids: list = None, extents: list = None):
 
-    # --------------------------------------------------------
-    # RESOLVE LOCATION
-    # --------------------------------------------------------
-
-    lon, lat = resolve_location(data_type, value)
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     fetch_r = radius_m if radius_m is not None else FETCH_RADIUS
     half_size    = radius_m if radius_m is not None else MAP_HALF_SIZE
     half_x = half_size * (992 / 737)
     half_y = half_size
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    logging.info("CONTEXT extent: half_x=%.0f half_y=%.0f (m)", half_x, half_y)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents if extents else None)
     if lot_gdf is not None:
         site_geom = lot_gdf.geometry.iloc[0]
         site_gdf = lot_gdf
@@ -339,6 +339,11 @@ def generate_context(data_type: str, value: str, ZONE_DATA: gpd.GeoDataFrame, ra
     )
 
     ax.set_axis_off()
+
+    # Re-apply extent so basemap/plotting cannot leave the map zoomed in
+    ax.set_xlim(site_point.x - half_x, site_point.x + half_x)
+    ax.set_ylim(site_point.y - half_y, site_point.y + half_y)
+    ax.autoscale(False)
 
     buffer = BytesIO()
     plt.tight_layout()

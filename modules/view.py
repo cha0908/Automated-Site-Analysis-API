@@ -8,41 +8,335 @@ from shapely.geometry import Point, Polygon
 from matplotlib.patches import Wedge, Patch
 from io import BytesIO
 
-# ✅ IMPORT UNIVERSAL RESOLVER
+# IMPORT UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache = True
 ox.settings.log_console = False
 
-FETCH_RADIUS = 1500
-MAP_RADIUS = 800
-VIEW_RADIUS = 360
-ARC_WIDTH = 40
-SECTOR_SIZE = 20
+# ── Radii ──────────────────────────────────────────────────────────────────────
+FETCH_RADIUS = 500    # OSM data fetch radius
+MAP_RADIUS   = 200    # visible map extent
+VIEW_RADIUS  = 200    # outer edge of the view ring
+ARC_WIDTH    = 30     # arc ring thickness
+CITY_RADIUS  = 30     # only buildings within 30 m count for CITY view
+SECTOR_SIZE  = 20     # degrees per wedge
+
+# ── Colour palette ─────────────────────────────────────────────────────────────
+COLOR_MAP = {
+    "PARK": "#3dbb74",
+    "SEA":  "#4fa3d1",
+    "CITY": "#e75b8c",
+}
 
 
-# ------------------------------------------------------------
-# MAIN GENERATOR
-# ------------------------------------------------------------
+# ══════════════════════════════════════════════════════════════════════════════
+# HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
 
-def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame):
+def _make_sector(cx, cy, radius, start_deg, end_deg, steps=40):
+    """Return a pie-slice Polygon for one wedge."""
+    angles = np.linspace(start_deg, end_deg, steps)
+    pts = [(cx, cy)]
+    for a in angles:
+        r = np.radians(a)
+        pts.append((cx + radius * np.cos(r), cy + radius * np.sin(r)))
+    return Polygon(pts)
 
-    # ✅ Dynamic resolver
-    lon, lat = resolve_location(data_type, value)
 
-    # --------------------------------------------------------
-    # SITE POLYGON (official lot boundary or OSM fallback)
-    # --------------------------------------------------------
+def _get_site_height(landsd_gdf, site_centroid):
+    """
+    Return HEIGHT_M of the building that contains the site centroid,
+    or the closest building if none contains it.
+    Falls back to 10.0 if the dataset is empty.
+    """
+    if not len(landsd_gdf):
+        return 10.0
+    containing = landsd_gdf[landsd_gdf.geometry.contains(site_centroid)]
+    if len(containing):
+        return float(containing.iloc[0]["HEIGHT_M"])
+    tmp = landsd_gdf.copy()
+    tmp["_dist"] = tmp.geometry.distance(site_centroid)
+    return float(tmp.sort_values("_dist").iloc[0]["HEIGHT_M"])
 
+
+def _classify_sectors(center, parks, water, city_candidates, h_ref, nearby, h_site):
+    """
+    Classify every SECTOR_SIZE wedge as PARK / SEA / CITY.
+    Priority: CITY > SEA > PARK. Sectors with no strong view default to CITY.
+    After initial classification, PARK/SEA sectors are overridden to CITY if
+    a building taller than the site in that wedge is closer than the content.
+    """
+    # Pre-compute bearing of every city candidate from site centre
+    if len(city_candidates):
+        cand = city_candidates.copy()
+        cand["_angle"] = cand.geometry.centroid.apply(
+            lambda pt: np.degrees(
+                np.arctan2(pt.y - center.y, pt.x - center.x)
+            ) % 360
+        )
+    else:
+        cand = pd.DataFrame(columns=["HEIGHT_M", "_angle"])
+
+    # Pre-compute bearing and distance for all nearby (for blocking check)
+    if len(nearby):
+        nb = nearby.copy()
+        nb["_angle"] = nb.geometry.centroid.apply(
+            lambda pt: np.degrees(
+                np.arctan2(pt.y - center.y, pt.x - center.x)
+            ) % 360
+        )
+        nb["_dist"] = nb.geometry.centroid.apply(lambda pt: center.distance(pt))
+    else:
+        nb = pd.DataFrame(columns=["HEIGHT_M", "_angle", "_dist"])
+
+    rows = []
+    for angle in range(0, 360, SECTOR_SIZE):
+        start, end  = angle, angle + SECTOR_SIZE
+        sector      = _make_sector(center.x, center.y, VIEW_RADIUS, start, end)
+        sector_area = sector.area or 1.0
+
+        green_share = (parks.intersection(sector).area.sum()
+                       if len(parks) else 0) / sector_area
+        water_share = (water.intersection(sector).area.sum()
+                       if len(water) else 0) / sector_area
+
+        # CITY: candidate in this wedge AND taller than h_ref
+        is_city = False
+        if len(cand):
+            in_wedge = cand[cand["_angle"].between(start, end, inclusive="left")]
+            if len(in_wedge) and (in_wedge["HEIGHT_M"] > h_ref).any():
+                is_city = True
+
+        if is_city:
+            view = "CITY"
+        elif water_share > 0.02 and water_share > green_share:
+            view = "SEA"
+        elif green_share > 0.02:
+            view = "PARK"
+        else:
+            view = "CITY"  # no strong view → urban default
+
+        # Blocking check: if view is PARK or SEA, override to CITY when a
+        # building taller than the site in this wedge is closer than the content
+        if view in ("PARK", "SEA") and len(nb):
+            in_wedge_nb = nb[
+                nb["_angle"].between(start, end, inclusive="left") &
+                (nb["_dist"] <= VIEW_RADIUS)
+            ].sort_values("_dist")
+            taller = in_wedge_nb[in_wedge_nb["HEIGHT_M"] > h_site]
+            if len(taller):
+                d_block = float(taller.iloc[0]["_dist"])
+                if view == "PARK":
+                    park_geom = parks.intersection(sector).unary_union
+                    content_dist = float("inf") if park_geom.is_empty else center.distance(park_geom)
+                else:
+                    water_geom = water.intersection(sector).unary_union
+                    content_dist = float("inf") if water_geom.is_empty else center.distance(water_geom)
+                if d_block < content_dist:
+                    view = "CITY"
+
+        rows.append({"start": start, "end": end, "view": view})
+
+    return rows
+
+
+def _merge_sectors(sector_rows):
+    """
+    Merge adjacent same-view wedges into larger arcs.
+    Handles wrap-around (last arc merges with first if same type).
+    Returns list of dicts: [{start, end, view}, ...]
+    """
+    merged = []
+    cur = dict(sector_rows[0])
+
+    for row in sector_rows[1:]:
+        if row["view"] == cur["view"]:
+            cur["end"] = row["end"]
+        else:
+            merged.append(cur)
+            cur = dict(row)
+
+    merged.append(cur)
+
+    # Wrap-around: merge last into first if same view type
+    if len(merged) > 1 and merged[0]["view"] == merged[-1]["view"]:
+        merged[0]["start"] = merged[-1]["start"]
+        merged.pop()
+
+    return merged
+
+
+def _draw_panel(ax, center, site_geom, buildings, parks, water,
+                nearby, sector_rows, title):
+    """
+    Render one complete view-analysis panel onto *ax*.
+
+    sector_rows : merged arc list [{start, end, view}, ...]
+    nearby      : GeoDataFrame with HEIGHT_M column (BUILDING_DATA subset)
+    """
+    ax.set_facecolor("#f2f2f2")
+    ax.set_xlim(center.x - MAP_RADIUS, center.x + MAP_RADIUS)
+    ax.set_ylim(center.y - MAP_RADIUS, center.y + MAP_RADIUS)
+    ax.set_aspect("equal")
+
+    # ── background layers ────────────────────────────────────────────────────
+    if len(parks):
+        parks.plot(ax=ax, color="#b8c8a0", edgecolor="none", zorder=1)
+    if len(water):
+        water.plot(ax=ax, color="#6bb6d9", edgecolor="none", zorder=2)
+    buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)
+
+    # ── radial guide lines ───────────────────────────────────────────────────
+    for angle in range(0, 360, SECTOR_SIZE):
+        rad = np.radians(angle)
+        ax.plot(
+            [center.x, center.x + MAP_RADIUS * np.cos(rad)],
+            [center.y, center.y + MAP_RADIUS * np.sin(rad)],
+            linestyle=(0, (2, 4)), linewidth=0.8,
+            color="#d49a2a", alpha=0.35, zorder=4,
+        )
+
+    # ── distance rings (80 / 160 / 200 m) ───────────────────────────────────
+    for d, label in [(80, "80 m"), (160, "160 m"), (200, "200 m")]:
+        gpd.GeoSeries([center.buffer(d)], crs=3857).boundary.plot(
+            ax=ax, linestyle=(0, (4, 4)), linewidth=1.2,
+            color="#555555", alpha=0.9, zorder=5,
+        )
+        ax.text(
+            center.x + d + 3, center.y, label,
+            fontsize=7, weight="bold", color="white",
+            bbox=dict(facecolor="black", edgecolor="none", pad=2), zorder=6,
+        )
+
+    # ── view arcs + arc labels ───────────────────────────────────────────────
+    for row in sector_rows:
+        start, end, view_type = row["start"], row["end"], row["view"]
+
+        # Normalise wrap-around arcs (e.g. start=340, end=40)
+        arc_span = end - start
+        if arc_span <= 0:
+            arc_span += 360
+        draw_end = start + arc_span   # Wedge handles values > 360 correctly
+
+        arc = Wedge(
+            (center.x, center.y),
+            VIEW_RADIUS,
+            start, draw_end,
+            width=ARC_WIDTH,
+            facecolor=COLOR_MAP[view_type],
+            edgecolor="white", linewidth=1.5, zorder=7,
+        )
+        ax.add_patch(arc)
+
+        # Label only when arc ≥ one sector wide
+        if arc_span >= SECTOR_SIZE:
+            mid_angle = start + arc_span / 2
+            mid_rad   = np.radians(mid_angle)
+            label_r   = VIEW_RADIUS - ARC_WIDTH / 2   # radial midpoint of ring
+
+            lx = center.x + label_r * np.cos(mid_rad)
+            ly = center.y + label_r * np.sin(mid_rad)
+
+            # Tangent rotation so text follows the ring
+            rotation = mid_angle - 90
+            if 90 < mid_angle % 360 < 270:
+                rotation += 180
+
+            ax.text(
+                lx, ly,
+                f"{view_type} VIEW",
+                fontsize=10, weight="bold", color="white",
+                ha="center", va="center",
+                rotation=rotation, rotation_mode="anchor",
+                zorder=8,
+            )
+
+    # ── building height labels ────────────────────────────────────────────────
+    # Top 12 tallest, outside 80 m inner ring, within 200 m analysis radius
+    label_candidates = nearby.copy()
+    label_candidates["_dist"] = label_candidates.geometry.centroid.apply(
+        lambda pt: center.distance(pt)
+    )
+    label_candidates = label_candidates[
+        (label_candidates["_dist"] > 80) &
+        (label_candidates["_dist"] <= MAP_RADIUS)
+    ]
+    top_buildings = label_candidates.sort_values(
+        "HEIGHT_M", ascending=False
+    ).head(12)
+
+    for _, brow in top_buildings.iterrows():
+        centroid = brow.geometry.centroid
+        ax.text(
+            centroid.x, centroid.y,
+            f"{brow['HEIGHT_M']:.1f} m",
+            fontsize=7, color="white",
+            bbox=dict(facecolor="black", edgecolor="none", pad=1.5),
+            ha="center", va="center", zorder=12,
+        )
+
+    # ── site polygon ─────────────────────────────────────────────────────────
+    gpd.GeoSeries([site_geom]).plot(
+        ax=ax, facecolor="#e74c3c", edgecolor="white",
+        linewidth=1.5, zorder=13,
+    )
+    ax.text(
+        center.x, center.y - 20, "SITE",
+        fontsize=11, weight="bold", ha="center", va="top", zorder=14,
+    )
+
+    # ── legend (bottom-right) ────────────────────────────────────────────────
+    legend_elements = [
+        Patch(facecolor="#3dbb74", label="Park View"),
+        Patch(facecolor="#4fa3d1", label="Sea View"),
+        Patch(facecolor="#e75b8c", label="City View"),
+    ]
+    ax.legend(
+        handles=legend_elements, loc="lower right",
+        frameon=True, facecolor="white", edgecolor="#444444",
+        framealpha=0.95, fontsize=8,
+    )
+
+    ax.set_title(title, fontsize=12, weight="bold", pad=10)
+    ax.set_axis_off()
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MAIN GENERATOR  (called by the API)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame,
+                  lon: float = None, lat: float = None,
+                  lot_ids: list = None, extents: list = None):
+    """
+    Generate a dual-panel (MID HEIGHT / MAX HEIGHT) view-analysis map.
+
+    Parameters
+    ----------
+    data_type     : resolver data-type string (e.g. "LOT")
+    value         : resolver value string    (e.g. "IL 1657")
+    BUILDING_DATA : GeoDataFrame with HEIGHT_M column, CRS=3857
+    lon, lat      : optional override coordinates (EPSG:4326)
+    lot_ids       : optional lot ID list for resolver
+    extents       : optional extent list for resolver
+
+    Returns
+    -------
+    BytesIO  PNG image buffer
+    """
+
+    # ── 1. Resolve location ────────────────────────────────────────────────────
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
+
+    # ── 2. Site polygon ────────────────────────────────────────────────────────
     lot_gdf = get_lot_boundary(lon, lat, data_type)
     if lot_gdf is not None:
         site_geom = lot_gdf.geometry.iloc[0]
-        center = site_geom.centroid
+        center    = site_geom.centroid
     else:
         site_building = ox.features_from_point(
-            (lat, lon),
-            dist=60,
-            tags={"building": True}
+            (lat, lon), dist=60, tags={"building": True}
         ).to_crs(3857)
 
         if len(site_building):
@@ -52,261 +346,62 @@ def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame):
                 .geometry.iloc[0]
             )
         else:
-            site_geom = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0].buffer(25)
-
+            site_geom = (gpd.GeoSeries([Point(lon, lat)], crs=4326)
+                         .to_crs(3857).iloc[0].buffer(25))
         center = site_geom.centroid
+
     analysis_circle = center.buffer(MAP_RADIUS)
 
-    # --------------------------------------------------------
-    # CONTEXT DATA
-    # --------------------------------------------------------
-
+    # ── 3. Context data ────────────────────────────────────────────────────────
     def fetch_layer(tags):
-        gdf = ox.features_from_point((lat, lon), dist=FETCH_RADIUS, tags=tags).to_crs(3857)
+        gdf = ox.features_from_point(
+            (lat, lon), dist=FETCH_RADIUS, tags=tags
+        ).to_crs(3857)
         return gdf[gdf.intersects(analysis_circle)]
 
     buildings = fetch_layer({"building": True})
-    parks = fetch_layer({"leisure":"park","landuse":"grass","natural":"wood"})
-    water = fetch_layer({"waterway":True,"natural":"water"})
+    parks     = fetch_layer({"leisure": "park", "landuse": "grass",
+                              "natural": "wood"})
+    water     = fetch_layer({"waterway": True, "natural": "water"})
 
     nearby = BUILDING_DATA[BUILDING_DATA.intersects(analysis_circle)].copy()
 
-    # --------------------------------------------------------
-    # CREATE FIGURE
-    # --------------------------------------------------------
+    # ── 4. Site building height ────────────────────────────────────────────────
+    H_max = _get_site_height(nearby, center)
+    H_mid = H_max / 2.0
 
-    fig, ax = plt.subplots(figsize=(12,12))
-    ax.set_facecolor("#f2f2f2")
-    ax.set_xlim(center.x - MAP_RADIUS, center.x + MAP_RADIUS)
-    ax.set_ylim(center.y - MAP_RADIUS, center.y + MAP_RADIUS)
-    ax.set_aspect("equal")
+    # ── 5. City candidates (≤ 30 m from site centre) ──────────────────────────
+    city_circle     = center.buffer(CITY_RADIUS)
+    city_candidates = nearby[nearby.intersects(city_circle)].copy()
 
-    if len(parks):
-        parks.plot(ax=ax, color="#b8c8a0", edgecolor="none", zorder=1)
+    # ── 6. Classify + merge sectors for both height levels ────────────────────
+    raw_mid    = _classify_sectors(center, parks, water, city_candidates, H_mid, nearby, H_max)
+    raw_max    = _classify_sectors(center, parks, water, city_candidates, H_max, nearby, H_max)
+    merged_mid = _merge_sectors(raw_mid)
+    merged_max = _merge_sectors(raw_max)
 
-    if len(water):
-        water.plot(ax=ax, color="#6bb6d9", edgecolor="none", zorder=2)
+    title_mid = (f"SITE ANALYSIS – View Analysis (MID HEIGHT)\n"
+                 f"ref = H_mid = {H_mid:.1f} m  (site building = {H_max:.1f} m)")
+    title_max = (f"SITE ANALYSIS – View Analysis (MAX HEIGHT)\n"
+                 f"ref = H_max = {H_max:.1f} m  (site building = {H_max:.1f} m)")
 
-    buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)
+    # ── 7. Render two panels side-by-side ─────────────────────────────────────
+    fig, axes = plt.subplots(1, 2, figsize=(22, 11))
 
-    # --------------------------------------------------------
-    # RADIAL GUIDES
-    # --------------------------------------------------------
-
-    for angle in range(0, 360, SECTOR_SIZE):
-        rad = np.radians(angle)
-        ax.plot(
-            [center.x, center.x + MAP_RADIUS*np.cos(rad)],
-            [center.y, center.y + MAP_RADIUS*np.sin(rad)],
-            linestyle=(0,(2,4)),
-            linewidth=0.8,
-            color="#d49a2a",
-            alpha=0.35,
-            zorder=4
-        )
-
-    # --------------------------------------------------------
-    # MPD RINGS
-    # --------------------------------------------------------
-
-    for d in [80,160,200]:
-        circle = center.buffer(d)
-        gpd.GeoSeries([circle], crs=3857).boundary.plot(
-            ax=ax,
-            linestyle=(0,(4,4)),
-            linewidth=1.2,
-            color="#555555",
-            alpha=0.9,
-            zorder=5
-        )
-
-        ax.text(
-            center.x + d,
-            center.y,
-            f"{d} mPD",
-            fontsize=8,
-            weight="bold",
-            color="white",
-            bbox=dict(facecolor="black", edgecolor="none", pad=2),
-            zorder=6
-        )
-
-    # --------------------------------------------------------
-    # SECTOR CREATION
-    # --------------------------------------------------------
-
-    def create_sector(start_angle, end_angle):
-        angles = np.linspace(start_angle, end_angle, 40)
-        points = [(center.x, center.y)]
-        for angle in angles:
-            rad = np.radians(angle)
-            x = center.x + VIEW_RADIUS * np.cos(rad)
-            y = center.y + VIEW_RADIUS * np.sin(rad)
-            points.append((x, y))
-        return Polygon(points)
-
-    sector_data = []
-
-    for angle in range(0, 360, SECTOR_SIZE):
-
-        sector = create_sector(angle, angle + SECTOR_SIZE)
-        sector_area = sector.area
-
-        green_area = parks.intersection(sector).area.sum() if len(parks) else 0
-        water_area = water.intersection(sector).area.sum() if len(water) else 0
-        building_area = buildings.intersection(sector).area.sum() if len(buildings) else 0
-
-        sector_heights = nearby[nearby.intersects(sector)]
-        avg_height = sector_heights["HEIGHT_M"].mean() if len(sector_heights) else 0
-
-        sector_data.append({
-            "start": angle,
-            "end": angle + SECTOR_SIZE,
-            "green": green_area / sector_area if sector_area else 0,
-            "water": water_area / sector_area if sector_area else 0,
-            "building": building_area / sector_area if sector_area else 0,
-            "avg_height": avg_height
-        })
-
-    df = pd.DataFrame(sector_data)
-
-    # --------------------------------------------------------
-    # NORMALIZATION + SCORING
-    # --------------------------------------------------------
-
-    def normalize(series):
-        if series.max() - series.min() == 0:
-            return series * 0
-        return (series - series.min()) / (series.max() - series.min())
-
-    df["green_n"] = normalize(df["green"])
-    df["water_n"] = normalize(df["water"])
-    df["height_n"] = normalize(df["avg_height"])
-    df["density_n"] = normalize(df["building"])
-
-    df["city_score"] = df["height_n"] * df["density_n"]
-    df["green_score"] = df["green_n"]
-    df["water_score"] = df["water_n"]
-    df["open_score"] = (1 - df["density_n"]) * (1 - df["height_n"])
-
-    df["view"] = df[["green_score","water_score","city_score","open_score"]].idxmax(axis=1)
-    df["view"] = df["view"].str.replace("_score","").str.upper()
-
-    # --------------------------------------------------------
-    # MERGE SECTORS
-    # --------------------------------------------------------
-
-    merged = []
-    current_start = df.iloc[0]["start"]
-    current_end = df.iloc[0]["end"]
-    current_type = df.iloc[0]["view"]
-
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-        if row["view"] == current_type:
-            current_end = row["end"]
-        else:
-            merged.append((current_start, current_end, current_type))
-            current_start = row["start"]
-            current_end = row["end"]
-            current_type = row["view"]
-
-    merged.append((current_start, current_end, current_type))
-
-    if merged[0][2] == merged[-1][2]:
-        merged[0] = (merged[-1][0], merged[0][1], merged[0][2])
-        merged.pop()
-
-    # --------------------------------------------------------
-    # DRAW VIEW ARCS
-    # --------------------------------------------------------
-
-    color_map = {
-        "GREEN": "#3dbb74",
-        "WATER": "#4fa3d1",
-        "CITY": "#e75b8c",
-        "OPEN": "#f0a25a"
-    }
-
-    for start, end, view_type in merged:
-        arc = Wedge(
-            (center.x, center.y),
-            VIEW_RADIUS,
-            start,
-            end,
-            width=ARC_WIDTH,
-            facecolor=color_map[view_type],
-            edgecolor="white",
-            linewidth=2,
-            zorder=7
-        )
-        ax.add_patch(arc)
-
-    # --------------------------------------------------------
-    # HEIGHT LABELS
-    # --------------------------------------------------------
-
-    top_buildings = nearby.sort_values("HEIGHT_M", ascending=False).head(25)
-
-    for _, row in top_buildings.iterrows():
-        centroid = row.geometry.centroid
-        ax.text(
-            centroid.x,
-            centroid.y,
-            f"{row['HEIGHT_M']:.1f} m",
-            fontsize=7,
-            color="white",
-            bbox=dict(facecolor="black", edgecolor="none", pad=1.5),
-            zorder=12
-        )
-
-    # --------------------------------------------------------
-    # SITE
-    # --------------------------------------------------------
-
-    gpd.GeoSeries([site_geom]).plot(
-        ax=ax,
-        facecolor="#e74c3c",
-        edgecolor="white",
-        linewidth=1.5,
-        zorder=13
-    )
-
-    ax.text(center.x, center.y - 35, "SITE", fontsize=12, weight="bold", ha="center", va="top")
-
-    # --------------------------------------------------------
-    # LEGEND
-    # --------------------------------------------------------
-
-    legend_elements = [
-        Patch(facecolor="#3dbb74", label="Green View"),
-        Patch(facecolor="#4fa3d1", label="Water View"),
-        Patch(facecolor="#e75b8c", label="City View"),
-        Patch(facecolor="#f0a25a", label="Open View"),
-    ]
-
-    ax.legend(
-        handles=legend_elements,
-        loc="lower right",
-        frameon=True,
-        facecolor="white",
-        edgecolor="#444444",
-        framealpha=0.95,
-        fontsize=9
-    )
-
-    # ✅ UPDATED TITLE
-    ax.set_title(
+    fig.suptitle(
         f"SITE ANALYSIS – View Analysis ({data_type} {value})",
-        fontsize=16,
-        weight="bold"
+        fontsize=18, weight="bold", y=1.01,
     )
 
-    ax.set_axis_off()
+    _draw_panel(axes[0], center, site_geom, buildings, parks, water,
+                nearby, merged_mid, title_mid)
+
+    _draw_panel(axes[1], center, site_geom, buildings, parks, water,
+                nearby, merged_max, title_max)
+
+    plt.tight_layout()
 
     buffer = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=200, bbox_inches="tight")
     plt.close(fig)
-
     return buffer

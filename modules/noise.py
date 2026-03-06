@@ -156,8 +156,8 @@ class ATCWFSLoader:
     _HEAVY_COLS = ["COMMERCIAL_PCT", "HEAVY_PCT", "HV_PCT", "CV_PCT",
                    "Commercial %", "Heavy %", "Heavy Vehicle %"]
     _SPEED_COLS = ["SPEED", "Speed", "Speed (km/h)", "SPEED_KMH"]
-    _ID_COLS    = ["STATION_NO", "STATIONNO", "STATION_ID", "STN_NO",
-                   "OBJECTID", "FID", "NO", "ID"]
+    _ID_COLS    = ["ATC_STATION_NO", "STATION_NO", "STATIONNO", "STATION_ID",
+                   "STN_NO", "OBJECTID", "FID", "NO", "ID"]
 
     def __init__(self, cfg):
         self.url     = cfg["atc_wfs_url"]
@@ -760,15 +760,15 @@ class NoiseVisualizer:
         v = noise[np.isfinite(noise)]
         if len(v):
             ax.text(
-            xl[1] - 0.01 * (xl[1] - xl[0]),
-            yl[0] + 0.01 * (yl[1] - yl[0]),
-            f"Max:  {v.max():.1f} dB(A)\n"
-            f"Mean: {v.mean():.1f} dB(A)\n"
-            f"Min:  {v.min():.1f} dB(A)\n"
-            f"Src:  {meta.get('L_source_range', '-')}",
-            fontsize=8, ha="right", va="bottom", zorder=30,
-            bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
-                    edgecolor="#aaa", alpha=0.88),
+                xl[1] - 0.01 * (xl[1] - xl[0]),
+                yl[0] + 0.01 * (yl[1] - yl[0]),
+                f"Max:  {v.max():.1f} dB(A)\n"
+                f"Mean: {v.mean():.1f} dB(A)\n"
+                f"Min:  {v.min():.1f} dB(A)\n"
+                f"Src:  {meta.get('L_source_range', '-')}",
+                fontsize=8, ha="right", va="bottom", zorder=30,
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="white",
+                          edgecolor="#aaa", alpha=0.88),
             )
 
         mask_d = self.cfg.get("road_mask_distance", 80)
@@ -806,27 +806,40 @@ class NoiseVisualizer:
 # PUBLIC API ENTRY POINT
 # ============================================================
 
-def generate_noise(data_type: str, value: str) -> BytesIO:
+def generate_noise(data_type: str, value: str,
+                   lon: float = None, lat: float = None,
+                   lot_ids: list = None, extents: list = None) -> BytesIO:
     cfg = CFG.copy()
 
-    lon, lat = resolve_location(data_type, value)
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+
+
+    site_polygon = None
+    site_gdf     = None
+    pt = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
+
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     if lot_gdf is not None:
-        site_polygon = lot_gdf.geometry.iloc[0]
-        site_gdf     = lot_gdf
-    else:
-        pt = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
+        geom = lot_gdf.geometry.iloc[0]
+        if geom is not None and geom.geom_type in ("Polygon", "MultiPolygon") and geom.area > 100:
+            site_polygon = geom
+            site_gdf     = lot_gdf
+            log.info(f"  Site: lot boundary (area={geom.area:.0f}m²)")
+        else:
+            log.info(f"  Site: lot boundary rejected (type={geom.geom_type if geom else None}) — trying OSM")
+
+    if site_polygon is None:
         try:
             cands = ox.features_from_point(
-                (lat, lon), dist=60, tags={"building": True}
+                (lat, lon), dist=80, tags={"building": True}
             ).to_crs(3857)
             cands["area"] = cands.area
+            cands = cands[cands.geometry.type.isin(["Polygon", "MultiPolygon"])]
             if not len(cands):
-                raise ValueError("no buildings near site")
-            site_polygon = cands.sort_values(
-                "area", ascending=False
-            ).geometry.iloc[0]
+                raise ValueError("no building polygons near site")
+            site_polygon = cands.sort_values("area", ascending=False).geometry.iloc[0]
+            log.info(f"  Site: OSM largest building (area={site_polygon.area:.0f}m²)")
         except Exception as e:
             log.info(f"  Site: buffer fallback ({e})")
             site_polygon = pt.buffer(40)

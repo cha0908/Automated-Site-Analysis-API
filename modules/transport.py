@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 import matplotlib
 matplotlib.use("Agg")
 
@@ -30,7 +30,6 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 MAP_RADIUS           = 3000
 COLOR_ROADS          = "#e85d9e"
-COLOR_WATER          = "#6fa8dc"
 COLOR_BUILDINGS      = "#d6d6d6"
 COLOR_SITE           = "#FF0000"
 COLOR_LIGHT_RAIL     = "#D3A809"
@@ -141,12 +140,16 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 # MAIN GENERATOR
 # ============================================================
 
-def generate_transport(data_type: str, value: str, radius_m: Optional[int] = None):
+# ── Main generator ────────────────────────────────────────────
+def generate_transport(data_type: str, value: str,
+                       radius_m: Optional[int] = None,
+                       lon: float = None, lat: float = None,
+                       lot_ids: List[str] = None,
+                       extents: List[dict] = None):
 
-    # Dynamic resolver
-    lon, lat = resolve_location(data_type, value)
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     r = radius_m if radius_m is not None else MAP_RADIUS
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
@@ -182,7 +185,6 @@ def generate_transport(data_type: str, value: str, radius_m: Optional[int] = Non
     roads      = keep_lines(safe_fetch({"highway": ["motorway", "trunk", "primary", "secondary"]}))
     light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
     stations   = safe_fetch({"railway": "station"})
-    water      = safe_fetch({"natural": "water"})
     mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
 
     gc.collect()
@@ -212,8 +214,7 @@ def generate_transport(data_type: str, value: str, radius_m: Optional[int] = Non
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-    if not water.empty:
-        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+
     if not roads.empty:
         roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
 

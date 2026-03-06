@@ -1,0 +1,56 @@
+======================================================================
+VIEW ANALYSIS DIAGNOSTIC – K11 Musea
+======================================================================
+── RADII (overrides applied) ──
+  FETCH_RADIUS=600 m, MAP_RADIUS=400 m, VIEW_RADIUS=400 m
+  CITY_RADIUS=30 m, SECTOR_SIZE=20°
+
+Loaded BUILDING_DATA: 42073 buildings (HEIGHT_M > 5)
+
+── 1. RESOLUTION ──
+  data_type=ADDRESS, value=K11 Musea
+  Resolved via geodata.gov.hk locationSearch: lon=114.174778, lat=22.294277
+
+── 2. SITE POLYGON ──
+  Source: OSM building or buffer fallback
+  center (3857): x=12709884.32, y=2546898.71
+
+── 3. WATER LAYER ──
+  FETCH_RADIUS=600, MAP_RADIUS=400
+  water (after intersect analysis_circle): 0 features
+  (no water features – water share will be 0)
+
+  parks (in circle): 21 features
+
+── 4. SITE HEIGHT ──
+  H_max=51.50 m, H_mid=25.75 m
+  nearby buildings (in analysis_circle): 94
+
+── 5. CITY CANDIDATES (intersect circle around site) ──
+  CITY_RADIUS=30 m, count=2
+    [0] HEIGHT_M=43.0, _angle=210.8°, _dist=39.2m
+    [1] HEIGHT_M=51.5, _angle=197.9°, _dist=35.0m
+  → Any sector containing one of these angles with HEIGHT_M > h_ref becomes CITY first.
+
+── 6. SECTOR SHARES & CLASSIFICATION (VIEW_RADIUS=400 m) ──
+  sector_area (one wedge): 27925 m²
+  sector   0- 20° | green=0.000 water=0.000 | mid=CITY max=CITY
+  sector  60- 80° | green=0.265 water=0.000 | mid=PARK max=PARK
+  sector 120-140° | green=0.006 water=0.000 | mid=CITY max=CITY
+  sector 140-160° | green=0.000 water=0.000 | mid=CITY max=CITY
+  sector 160-180° | green=0.010 water=0.000 | mid=CITY max=CITY
+  sector 180-200° | green=0.047 water=0.000 | mid=CITY max=PARK
+  sector 200-220° | green=0.000 water=0.000 | mid=CITY max=CITY
+  sector 220-240° | green=0.000 water=0.000 | mid=CITY max=CITY
+  sector 240-260° | green=0.000 water=0.000 | mid=CITY max=CITY
+  sector 300-320° | green=0.000 water=0.000 | mid=CITY max=CITY
+
+── 7. SUMMARY (MID panel) ──
+  CITY: 14 sectors
+  PARK: 4 sectors
+
+── 8. SUMMARY (MAX panel) ──
+  CITY: 13 sectors
+  PARK: 5 sectors
+
+── 9. GENERATING IMAGE ──

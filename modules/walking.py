@@ -17,45 +17,16 @@ from shapely.geometry import Point
 from io import BytesIO
 
 from modules.resolver import resolve_location, get_lot_boundary
+from modules.ring_configs import WALK_RING_CONFIGS as RING_CONFIGS
 
 ox.settings.log_console = False
-ox.settings.use_cache   = True   # cache OSM downloads to disk → avoids re-fetching
+ox.settings.use_cache   = True
 
-# ── Memory: restrict matplotlib thread usage ─────────────────
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-# ── Ring configs ──────────────────────────────────────────────
-RING_CONFIGS = {
-    5: {
-        "rings":      [(83,  "1 min\n0.08 km"),
-                       (250, "3 min\n0.25 km"),
-                       (400, "5 min\n0.40 km")],
-        "shade_r":    400,
-        "map_extent": 600,
-        "walk_dist":  600,    # ↓ smaller fetch = less RAM
-    },
-    10: {
-        "rings":      [(250, "3 min\n0.25 km"),
-                       (500, "6 min\n0.50 km"),
-                       (750, "10 min\n0.75 km")],
-        "shade_r":    750,
-        "map_extent": 875,
-        "walk_dist":  900,    # ↓ trimmed
-    },
-    15: {
-        "rings":      [(375,  "5 min\n0.375 km"),
-                       (750,  "10 min\n0.75 km"),
-                       (1125, "15 min\n1.125 km")],
-        "shade_r":    1125,
-        "map_extent": 1300,
-        "walk_dist":  1400,   # ↓ trimmed from 1800
-    },
-}
-
 WALK_SPEED_KMPH = 5
 
-# ── MTR logo ──────────────────────────────────────────────────
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
 _MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
 try:
@@ -89,21 +60,27 @@ def _add_mtr_icon(ax, x, y, size=0.04, zorder=15):
                 zorder=zorder+1, transform=ax.transData)
 
 
-# ── Main generator ────────────────────────────────────────────
-
+# ── PATCHED: added lon/lat params ─────────────────────────────
 def generate_walking(data_type: str, value: str,
-                     max_walk_minutes: int = 5):
+                     max_walk_minutes: int = 5,
+                     lon: float = None, lat: float = None,
+                     lot_ids: list = None, extents: list = None):
 
+    try:
+        max_walk_minutes = int(max_walk_minutes)
+    except (TypeError, ValueError):
+        max_walk_minutes = 15
+    max_walk_minutes = max(5, min(20, max_walk_minutes))
     if max_walk_minutes not in RING_CONFIGS:
         max_walk_minutes = 15
     cfg        = RING_CONFIGS[max_walk_minutes]
     MAP_EXTENT = cfg["map_extent"]
     MAP_EXTENT_X = MAP_EXTENT * (992 / 737)
     MAP_EXTENT_Y = MAP_EXTENT
-    lon, lat = resolve_location(data_type, value)
+    # ── PATCHED: pass lon/lat through ─────────────────────────
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
-    # ── Site footprint ────────────────────────────────────────
-    lot_gdf = get_lot_boundary(lon, lat, data_type)
+    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
@@ -130,10 +107,8 @@ def generate_walking(data_type: str, value: str,
         site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
         site_point = site_geom.centroid
 
-    gc.collect()   # free site fetch memory before graph fetch
+    gc.collect()
 
-    # ── Walk network — simplified graph for low RAM ───────────
-    # simplify=True (default) keeps fewer nodes → less RAM
     G_walk = ox.graph_from_point(
         (lat, lon),
         dist=cfg["walk_dist"],
@@ -145,15 +120,26 @@ def generate_walking(data_type: str, value: str,
     site_wgs  = gpd.GeoSeries([site_point], crs=3857).to_crs(4326).iloc[0]
     site_node = ox.distance.nearest_nodes(G_walk, site_wgs.x, site_wgs.y)
 
-    # ── Stations ──────────────────────────────────────────────
-    # Limit fetch radius to max_radius * 1.5 (not *2) to save memory
+    # Try progressively larger radii — ADDRESS coords (road midpoints) may be imprecise
     station_fetch_r = max(int(cfg["shade_r"] * 1.5), 1200)
-    stations = ox.features_from_point(
-        (lat, lon), tags={"railway": "station"}, dist=station_fetch_r
-    ).to_crs(3857)
-    stations = stations[stations.geometry.notnull()]
+    if data_type.upper() == "ADDRESS":
+        station_fetch_r = max(station_fetch_r, 2000)
+
+    stations = gpd.GeoDataFrame()
+    for search_r in [station_fetch_r, 3000, 5000]:
+        try:
+            found = ox.features_from_point(
+                (lat, lon), tags={"railway": "station"}, dist=search_r
+            ).to_crs(3857)
+            found = found[found.geometry.notnull()]
+            if not found.empty:
+                stations = found
+                break
+        except Exception:
+            continue
+
     if stations.empty:
-        raise ValueError("No nearby stations found.")
+        raise ValueError("No nearby MTR stations found within 5km of this location.")
 
     def _name(r):
         a = r.get("name:en"); b = r.get("name")
@@ -163,13 +149,11 @@ def generate_walking(data_type: str, value: str,
 
     stations["station_name"] = stations.apply(_name, axis=1)
     stations["dist"] = stations.geometry.centroid.distance(site_point)
-    # Keep up to 3 nearest stations, but only within the map extent
     stations = stations.sort_values("dist")
     stations = stations[stations["dist"] <= MAP_EXTENT].head(3)
 
     gc.collect()
 
-    # ── Routes ────────────────────────────────────────────────
     routes = []
     for _, row in stations.iterrows():
         st_centroid = row.geometry.centroid
@@ -193,7 +177,7 @@ def generate_walking(data_type: str, value: str,
     fig, ax = plt.subplots(figsize=(16.15, 12))   # slightly smaller figure
 
     roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
-    del roads   # free road memory before basemap fetch
+    del roads
     gc.collect()
 
     gpd.GeoSeries([site_point.buffer(cfg["shade_r"])], crs=3857).plot(
@@ -239,8 +223,6 @@ def generate_walking(data_type: str, value: str,
     ax.set_aspect("equal")
 
     zoom_level = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)
-
-    # ↓ alpha=0.35 reduces tile download size slightly
     cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
                    zoom=zoom_level, alpha=1)
 
@@ -251,9 +233,7 @@ def generate_walking(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    # ↓ dpi=100 instead of 120 — saves ~30% image RAM
     plt.savefig(buf, format="png", dpi=100)
     plt.close(fig)
-
-    gc.collect()   # final cleanup
+    gc.collect()
     return buf

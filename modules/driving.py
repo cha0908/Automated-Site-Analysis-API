@@ -19,6 +19,7 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from io import BytesIO
 
 from modules.resolver import resolve_location, get_lot_boundary
+from modules.ring_configs import DRIVE_RING_CONFIGS as RING_CONFIGS
 
 ox.settings.use_cache   = True
 ox.settings.log_console = False
@@ -27,27 +28,6 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 DRIVE_SPEED = 35  # km/h
-
-RING_CONFIGS = {
-    5: {
-        "rings":      [(83,  "1.5 MINS\n0.083 KM"),
-                       (250, "3 MINS\n0.25 KM"),
-                       (400, "5 MINS\n0.40 KM")],
-        "max_radius": 400, "map_extent": 600,  "graph_dist": 800,
-    },
-    10: {
-        "rings":      [(250, "3 MINS\n0.25 KM"),
-                       (500, "6 MINS\n0.50 KM"),
-                       (750, "10 MINS\n0.75 KM")],
-        "max_radius": 750, "map_extent": 875,  "graph_dist": 1500,
-    },
-    15: {
-        "rings":      [(375,  "1.5 MINS\n0.375 KM"),
-                       (750,  "3 MINS\n0.75 KM"),
-                       (1125, "4.5 MINS\n1.125 KM")],
-        "max_radius": 1300, "map_extent": 1400, "graph_dist": 2500,
-    },
-}
 
 INGRESS_COLOR = "#e74c3c"
 EGRESS_COLOR  = "#27ae60"
@@ -234,15 +214,22 @@ def _north_arrow(ax, xlim, ylim, extent):
 # ── Main generator ────────────────────────────────────────────
 def generate_driving(data_type: str, value: str,
                      zone_data: gpd.GeoDataFrame = None,
+                     lon: float = None, lat: float = None,
+                     lot_ids: list = None, extents: list = None,
                      max_drive_minutes: int = 15):
 
+    try:
+        max_drive_minutes = int(max_drive_minutes)
+    except (TypeError, ValueError):
+        max_drive_minutes = 15
+    max_drive_minutes = max(5, min(20, max_drive_minutes))
     if max_drive_minutes not in RING_CONFIGS:
         max_drive_minutes = 15
     cfg        = RING_CONFIGS[max_drive_minutes]
     MAP_EXTENT = cfg["map_extent"]
     MAP_EXTENT_X = MAP_EXTENT * (992 / 737)
-    MAP_EXTENT_Y = MAP_EXTENT
-    lon, lat = resolve_location(data_type, value)
+    MAP_EXTENT_Y = MAP_EXTENT                         
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
     site_pt_3857 = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
