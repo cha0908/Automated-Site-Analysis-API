@@ -10,7 +10,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from typing import Optional
 from shapely.geometry import Point
 from io import BytesIO
@@ -21,13 +21,13 @@ from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache        = True
 ox.settings.log_console      = False
-ox.settings.requests_timeout = 18
+ox.settings.requests_timeout = 25
 
 log = logging.getLogger(__name__)
 
-FETCH_RADIUS     = 600   # smaller = faster OSMnx queries
-MAP_HALF_SIZE    = 600
-MTR_COLOR        = "#ffd166"
+FETCH_RADIUS  = 600
+MAP_HALF_SIZE = 600
+MTR_COLOR     = "#ffd166"
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
 _BUS_ICON_PATH = os.path.join(_STATIC_DIR, "bus.png")
@@ -58,72 +58,41 @@ def infer_site_type(zone: str) -> str:
     return "MIXED"
 
 
-TYPE_CONFIG = {
-    "RESIDENTIAL": {
-        "similar_tags":    {"building": ["apartments", "residential",
-                                         "house", "dormitory", "detached", "terrace"]},
-        "support_tags":    {"amenity": ["school", "hospital", "supermarket"],
-                            "leisure": ["park"]},
-        "highlight_color": "#e07b39",
-        "support_color":   "#9ecae1",
-        "highlight_label": "Residential Developments",
-        "support_label":   "Schools / Parks / Hospitals",
-    },
-    "HOTEL": {
-        "similar_tags":    {"tourism": ["hotel", "hostel", "resort"],
-                            "building": ["hotel"]},
-        "support_tags":    {"tourism": ["attraction"],
-                            "amenity": ["restaurant"], "shop": ["mall"]},
-        "highlight_color": "#b15928",
-        "support_color":   "#fb9a99",
-        "highlight_label": "Hotels & Serviced Apartments",
-        "support_label":   "Restaurants / Attractions",
-    },
-    "COMMERCIAL": {
-        "similar_tags":    {"building": ["office", "commercial"],
-                            "office": True, "landuse": ["commercial"]},
-        "support_tags":    {"amenity": ["bank", "restaurant"],
-                            "railway": ["station"]},
-        "highlight_color": "#6a3d9a",
-        "support_color":   "#cab2d6",
-        "highlight_label": "Office / Commercial Buildings",
-        "support_label":   "Banks / Restaurants / Transit",
-    },
-    "INSTITUTIONAL": {
-        "similar_tags":    {"amenity": ["school", "college", "university",
-                                        "hospital", "clinic", "government"]},
-        "support_tags":    {"leisure": ["park"], "amenity": ["library"]},
-        "highlight_color": "#1f78b4",
-        "support_color":   "#b7dfb9",
-        "highlight_label": "Institutional Buildings",
-        "support_label":   "Parks / Libraries",
-    },
-    "INDUSTRIAL": {
-        "similar_tags":    {"building": ["industrial", "warehouse"],
-                            "landuse": ["industrial"],
-                            "industrial": ["factory"]},
-        "support_tags":    {"highway": ["motorway"], "landuse": ["port"]},
-        "highlight_color": "#33a02c",
-        "support_color":   "#b2df8a",
-        "highlight_label": "Industrial / Warehouse Buildings",
-        "support_label":   "Ports / Motorways",
-    },
-    "OTHER": {
-        "similar_tags":    {"building": True},
-        "support_tags":    {"amenity": True},
-        "highlight_color": "#aaaaaa",
-        "support_color":   "#dddddd",
-        "highlight_label": "Nearby Buildings",
-        "support_label":   "Amenities",
-    },
-    "MIXED": {
-        "similar_tags":    {"building": True},
-        "support_tags":    {"amenity": True, "leisure": True},
-        "highlight_color": "#aaaaaa",
-        "support_color":   "#b7dfb9",
-        "highlight_label": "Nearby Buildings",
-        "support_label":   "Amenities / Parks",
-    },
+# ── Per-type similar building tags (used in FETCH 2) ─────────────────────────
+
+SIMILAR_TAGS = {
+    "RESIDENTIAL":   {"building": ["apartments", "residential",
+                                   "house", "dormitory", "detached", "terrace"]},
+    "HOTEL":         {"tourism": ["hotel", "hostel", "resort"],
+                      "building": ["hotel"]},
+    "COMMERCIAL":    {"building": ["office", "commercial"],
+                      "office": True},
+    "INSTITUTIONAL": {"amenity": ["school", "college", "university",
+                                  "hospital", "government"]},
+    "INDUSTRIAL":    {"building": ["industrial", "warehouse"],
+                      "landuse": ["industrial"]},
+    "OTHER":         {"building": True},
+    "MIXED":         {"building": True},
+}
+
+HIGHLIGHT_COLOR = {
+    "RESIDENTIAL":   "#e07b39",
+    "HOTEL":         "#b15928",
+    "COMMERCIAL":    "#6a3d9a",
+    "INSTITUTIONAL": "#1f78b4",
+    "INDUSTRIAL":    "#33a02c",
+    "OTHER":         "#aaaaaa",
+    "MIXED":         "#aaaaaa",
+}
+
+HIGHLIGHT_LABEL = {
+    "RESIDENTIAL":   "Residential Developments",
+    "HOTEL":         "Hotels & Serviced Apartments",
+    "COMMERCIAL":    "Office / Commercial Buildings",
+    "INSTITUTIONAL": "Institutional Buildings",
+    "INDUSTRIAL":    "Industrial / Warehouse Buildings",
+    "OTHER":         "Nearby Buildings",
+    "MIXED":         "Nearby Buildings",
 }
 
 
@@ -134,35 +103,25 @@ def wrap_label(text, width=18):
 
 
 def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
-    """Single OSMnx fetch — returns empty GDF on any failure."""
     try:
         gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
         if gdf is not None and not gdf.empty:
             return gdf.to_crs(3857)
     except Exception as e:
-        log.debug(f"[context] fetch {list(tags.keys())[:2]}: {e}")
+        log.debug(f"[context] fetch {list(tags.keys())[:3]}: {e}")
     return _EMPTY.copy()
 
 
-def _parallel_fetch(tasks: dict, wall_timeout: float = 55) -> dict:
-    """
-    Run fetch tasks in parallel.
-    tasks = {key: (lat, lon, dist, tags), ...}
-    Returns {key: GeoDataFrame} — missing keys get empty GDF.
-    Hard wall-clock timeout so we never exceed Render's request limit.
-    """
+def _parallel_fetch(tasks: dict, wall_timeout: float = 120) -> dict:
     results = {k: _EMPTY.copy() for k in tasks}
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         futures = {pool.submit(_fetch_one, *args): key
                    for key, args in tasks.items()}
         done, not_done = wait(futures, timeout=wall_timeout,
                               return_when=ALL_COMPLETED)
-        # Cancel anything still running
         for f in not_done:
             f.cancel()
-            key = futures[f]
-            log.warning(f"[context] timeout: {key}")
-        # Collect completed
+            log.warning(f"[context] timeout: {futures[f]}")
         for f in done:
             key = futures[f]
             try:
@@ -195,25 +154,19 @@ def _polys_only(gdf):
 
 
 def _get_name(gdf):
-    """Prefer English name, fall back to name — return None if non-ASCII."""
-    raw = _col(gdf, "name:en").fillna(_col(gdf, "name"))
-    return raw
+    return _col(gdf, "name:en").fillna(_col(gdf, "name"))
 
 
 def _ascii_only(text: str) -> Optional[str]:
-    """Return text if it contains mostly ASCII letters, else None."""
     if not text or not isinstance(text, str):
         return None
-    stripped = text.strip()
-    if not stripped:
+    s = text.strip()
+    if not s:
         return None
-    # Count printable ASCII letters (a-z, A-Z, 0-9, space, punctuation)
-    ascii_chars = sum(1 for c in stripped if ord(c) < 128)
-    # Reject if less than 50% ASCII (catches mostly-Chinese strings)
-    if ascii_chars / max(len(stripped), 1) < 0.5:
+    ascii_chars = sum(1 for c in s if ord(c) < 128)
+    if ascii_chars / max(len(s), 1) < 0.5:
         return None
-    # Remove any remaining non-ASCII characters inline
-    cleaned = "".join(c for c in stripped if ord(c) < 128).strip()
+    cleaned = "".join(c for c in s if ord(c) < 128).strip()
     return cleaned if cleaned else None
 
 
@@ -233,8 +186,8 @@ def _draw_mtr_icon(ax, x, y, zoom=0.035, zorder=14):
                             zorder=zorder, box_alignment=(0.5, 0.5))
         ax.add_artist(ab)
     else:
-        ax.plot(x, y, "o", color="#ED1D24", markersize=10,
-                markeredgecolor="white", markeredgewidth=1.5, zorder=zorder)
+        ax.plot(x, y, "o", color="#ED1D24", markersize=12,
+                markeredgecolor="white", markeredgewidth=2, zorder=zorder)
 
 
 # ── Main generator ────────────────────────────────────────────────────────────
@@ -267,12 +220,12 @@ def generate_context(
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
         site_point = site_geom.centroid
-        log.info(f"[context] lot boundary: {site_geom.geom_type} area={site_geom.area:.0f}m²")
+        log.info(f"[context] lot boundary found area={site_geom.area:.0f}m²")
     else:
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_geom  = site_point.buffer(80)   # 80m radius — clearly visible
+        site_geom  = site_point.buffer(80)
         site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-        log.info("[context] using fallback buffer for site")
+        log.info("[context] using fallback buffer")
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -282,63 +235,70 @@ def generate_context(
     primary   = primary.iloc[0]
     zone      = primary["ZONE_LABEL"]
     SITE_TYPE = infer_site_type(zone)
-    cfg       = TYPE_CONFIG.get(SITE_TYPE, TYPE_CONFIG["MIXED"])
+    sim_tags  = SIMILAR_TAGS.get(SITE_TYPE, SIMILAR_TAGS["MIXED"])
+    hi_color  = HIGHLIGHT_COLOR.get(SITE_TYPE, "#aaaaaa")
+    hi_label  = HIGHLIGHT_LABEL.get(SITE_TYPE, "Nearby Buildings")
     log.info(f"[context] zone={zone} site_type={SITE_TYPE}")
 
-    # ── Parallel fetch — 5 tasks, 110s wall-clock limit ──────────────────────
-    log.info("[context] Fetching (parallel, 110s limit)...")
+    # ── 3 parallel fetches only ───────────────────────────────────────────────
+    # FETCH 1 "base": everything except buildings — landuse, leisure, amenity,
+    #                  bus stops, stations, place labels all in one call
+    # FETCH 2 "similar": type-specific building tags
+    # FETCH 3 "stations": MTR stations at wider radius for accuracy
+    log.info("[context] Fetching 3 tasks in parallel (120s limit)...")
     results = _parallel_fetch({
-        # One merged fetch: landuse + leisure + amenity + stations + labels
-        "base":     (lat, lon, fetch_r,
-                     {"landuse": True,
-                      "leisure": ["park", "playground", "garden",
-                                  "recreation_ground"],
-                      "amenity": ["school", "college", "university",
-                                  "hospital"],
-                      "railway": ["station"],
-                      "place":   ["neighbourhood", "suburb"]}),
-        "similar":  (lat, lon, fetch_r,  cfg["similar_tags"]),
-        "support":  (lat, lon, fetch_r,  cfg["support_tags"]),
-        "bus":      (lat, lon, 600,      {"highway": "bus_stop"}),
-        "stations": (lat, lon, 1200,     {"railway": "station"}),
-    }, wall_timeout=110)
+        "base": (lat, lon, fetch_r, {
+            "landuse":  True,
+            "leisure":  ["park", "playground", "garden", "recreation_ground"],
+            "amenity":  ["school", "college", "university", "hospital",
+                         "supermarket", "restaurant", "bank"],
+            "highway":  ["bus_stop"],
+            "place":    ["neighbourhood", "suburb"],
+        }),
+        "similar":  (lat, lon, fetch_r, sim_tags),
+        "stations": (lat, lon, 1200,    {"railway": "station"}),
+    }, wall_timeout=120)
     gc.collect()
 
-    # ── Process base ──────────────────────────────────────────────────────────
-    base             = results["base"]
+    # ── Derive all layers from base ───────────────────────────────────────────
+    base = results["base"]
+
     residential_area = _filter_col(base, "landuse", "residential")
     industrial_area  = _filter_col(base, "landuse", ["industrial", "commercial"])
     parks            = _filter_col(base, "leisure", "park")
-    # Schools and labels come from base (merged fetch)
     schools          = _filter_col(base, "amenity",
                                    ["school", "college", "university"])
-    labels_raw       = base   # use full base for label collection
-    del base
 
-    similar_blds  = _polys_only(results["similar"])
-    support_blds  = _polys_only(results["support"])
-    bus_stops_raw = results["bus"]
+    # Bus stops — points with highway=bus_stop
+    bus_stops_gdf = _EMPTY.copy()
+    if not base.empty and "highway" in base.columns:
+        bs = base[_col(base, "highway") == "bus_stop"].copy()
+        if not bs.empty:
+            bus_stops_gdf = bs
+
+    # Similar buildings — polygons only, clipped to view
+    similar_blds = _polys_only(results["similar"])
 
     # ── Process stations ──────────────────────────────────────────────────────
     stations_raw     = results["stations"]
     stations_in_view = _EMPTY.copy()
-    stations         = _EMPTY.copy()
 
     if not stations_raw.empty:
         s             = stations_raw.copy()
         s["name"]     = _get_name(s)
         s["centroid"] = s.geometry.centroid
         s["dist"]     = s["centroid"].apply(lambda g: g.distance(site_point))
-        stations      = s.dropna(subset=["name"]).sort_values("dist").head(3)
-        stations_in_view = stations[stations["dist"] <= half_size * 1.3]
+        stn           = s.dropna(subset=["name"]).sort_values("dist").head(3)
+        stations_in_view = stn[stn["dist"] <= half_size * 1.4]
 
-    # ── Process bus stops ─────────────────────────────────────────────────────
-    bus_stops = bus_stops_raw.copy() if not bus_stops_raw.empty else _EMPTY.copy()
+    # ── Bus stops — cluster to max 6 ─────────────────────────────────────────
+    bus_stops = bus_stops_gdf.copy()
     if len(bus_stops) > 6:
         try:
             from sklearn.cluster import KMeans
-            coords = np.array([[g.centroid.x, g.centroid.y]
-                                for g in bus_stops.geometry])
+            pts    = [g.centroid if hasattr(g, "centroid") else g
+                      for g in bus_stops.geometry]
+            coords = np.array([[p.x, p.y] for p in pts])
             bus_stops["cluster"] = KMeans(
                 n_clusters=6, random_state=0).fit(coords).labels_
             bus_stops = gpd.GeoDataFrame(
@@ -346,7 +306,7 @@ def generate_context(
         except Exception:
             bus_stops = bus_stops.head(6)
 
-    # ── Place labels ──────────────────────────────────────────────────────────
+    # ── Labels from base ─────────────────────────────────────────────────────
     all_label_items = []
     seen_texts      = set()
 
@@ -358,11 +318,8 @@ def generate_context(
         named    = g.dropna(subset=["_lb"])
         named    = named[named["_lb"].astype(str).str.strip().str.len() > 0]
         for _, row in named.iterrows():
-            raw  = str(row["_lb"]).strip()
-            text = _ascii_only(raw)   # drop Chinese / non-ASCII names
-            if not text:
-                continue
-            if text in seen_texts:
+            text = _ascii_only(str(row["_lb"]).strip())
+            if not text or text in seen_texts:
                 continue
             seen_texts.add(text)
             geom = row.geometry
@@ -370,12 +327,13 @@ def generate_context(
                     if hasattr(geom, "representative_point") else geom.centroid)
             all_label_items.append((p.distance(site_point), geom, text))
 
-    for src in [labels_raw, schools, parks, similar_blds, support_blds]:
+    for src in [base, schools, parks, similar_blds]:
         _collect(src)
+
     all_label_items.sort(key=lambda x: x[0])
     all_label_items = [(g, t) for _, g, t in all_label_items[:35]]
 
-    del labels_raw, results
+    del base, results
     gc.collect()
 
     log.info("[context] Rendering...")
@@ -402,15 +360,18 @@ def generate_context(
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    # ── Layers ────────────────────────────────────────────────────────────────
+    # ── Base layers ───────────────────────────────────────────────────────────
     _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
     _safe_plot(schools,          ax, color="#9ecae1", alpha=0.90, zorder=2)
-    _safe_plot(support_blds,     ax, color=cfg["support_color"],   alpha=0.60, zorder=3)
-    _safe_plot(similar_blds,     ax, color=cfg["highlight_color"], alpha=0.80, zorder=4)
 
-    del residential_area, industrial_area, parks, schools, support_blds, similar_blds
+    del residential_area, industrial_area, parks, schools
+    gc.collect()
+
+    # ── Similar / type-specific buildings ────────────────────────────────────
+    _safe_plot(similar_blds, ax, color=hi_color, alpha=0.80, zorder=3)
+    del similar_blds
     gc.collect()
 
     # ── Bus stops ─────────────────────────────────────────────────────────────
@@ -427,7 +388,8 @@ def generate_context(
                                         zorder=9, box_alignment=(0.5, 0.5))
                     ax.add_artist(ab)
             else:
-                bus_stops.plot(ax=ax, color="#0d47a1", markersize=35, zorder=9)
+                bus_stops.plot(ax=ax, color="#0d47a1", markersize=40,
+                               zorder=9, marker="s")
         except Exception as e:
             log.debug(f"[context] bus stop render: {e}")
     del bus_stops
@@ -444,7 +406,7 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site — always on top ──────────────────────────────────────────────────
+    # ── Site — drawn last, always on top ─────────────────────────────────────
     try:
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred",
                       linewidth=2.5, zorder=15)
@@ -456,14 +418,14 @@ def generate_context(
 
     # ── Place labels ──────────────────────────────────────────────────────────
     placed  = []
-    offsets = [(0, 40), (0, -40), (40, 0), (-40, 0), (30, 30), (-30, 30)]
+    offsets = [(0, 40), (0, -40), (40, 0), (-40, 0), (28, 28), (-28, 28)]
     for i, (geom, text) in enumerate(all_label_items):
         try:
             p = (geom.representative_point()
                  if hasattr(geom, "representative_point") else geom.centroid)
             if p.distance(site_point) < 100:
                 continue
-            if any(p.distance(pp) < 100 for pp in placed):
+            if any(p.distance(pp) < 95 for pp in placed):
                 continue
             dx, dy = offsets[i % len(offsets)]
             ax.text(p.x + dx, p.y + dy, wrap_label(text, 18),
@@ -479,10 +441,8 @@ def generate_context(
     if not stations_in_view.empty:
         try:
             for _, st in stations_in_view.iterrows():
-                raw = st.get("name")
-                if not raw or not isinstance(raw, str) or not str(raw).strip():
-                    continue
-                label = _ascii_only(str(raw).strip())
+                raw   = st.get("name")
+                label = _ascii_only(str(raw).strip()) if raw else None
                 if not label:
                     continue
                 c = st.geometry.centroid
@@ -511,17 +471,14 @@ def generate_context(
     # ── Legend ────────────────────────────────────────────────────────────────
     ax.legend(
         handles=[
-            mpatches.Patch(color="#f2c6a0",              label="Residential Area"),
-            mpatches.Patch(color="#b39ddb",              label="Industrial / Commercial Area"),
-            mpatches.Patch(color="#b7dfb9",              label="Public Park"),
-            mpatches.Patch(color="#9ecae1",              label="School / Institution"),
-            mpatches.Patch(color=cfg["highlight_color"], alpha=0.80,
-                           label=cfg["highlight_label"]),
-            mpatches.Patch(color=cfg["support_color"],   alpha=0.60,
-                           label=cfg["support_label"]),
-            mpatches.Patch(color=MTR_COLOR,              label="MTR Station"),
-            mpatches.Patch(color="#e53935",              label="Site"),
-            mpatches.Patch(color="#0d47a1",              label="Bus Stop"),
+            mpatches.Patch(color="#f2c6a0",   label="Residential Area"),
+            mpatches.Patch(color="#b39ddb",   label="Industrial / Commercial Area"),
+            mpatches.Patch(color="#b7dfb9",   label="Public Park"),
+            mpatches.Patch(color="#9ecae1",   label="School / Institution"),
+            mpatches.Patch(color=hi_color, alpha=0.80, label=hi_label),
+            mpatches.Patch(color=MTR_COLOR,   label="MTR Station"),
+            mpatches.Patch(color="#e53935",   label="Site"),
+            mpatches.Patch(color="#0d47a1",   label="Bus Stop"),
         ],
         loc="lower left", bbox_to_anchor=(0.02, 0.02),
         fontsize=8.5, framealpha=0.95,
