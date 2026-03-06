@@ -38,7 +38,8 @@ log = logging.getLogger(__name__)
 # ============================================================
 
 MAP_FETCH_RADIUS     = 4000
-HALF_W               = 1900
+HALF_W_LEFT          = 1600
+HALF_W_RIGHT         = 2200
 HALF_H               = 1100
 
 COLOR_ROADS          = "#e85d9e"
@@ -403,8 +404,8 @@ def generate_transport(data_type: str, value: str,
     gc.collect()
 
     # ── Map extent ────────────────────────────────────────────
-    xmin = site_point.x - HALF_W
-    xmax = site_point.x + HALF_W
+    xmin = site_point.x - HALF_W_LEFT
+    xmax = site_point.x + HALF_W_RIGHT
     ymin = site_point.y - HALF_H
     ymax = site_point.y + HALF_H
     clip_box = box(xmin, ymin, xmax, ymax)
@@ -419,7 +420,7 @@ def generate_transport(data_type: str, value: str,
 
     cx.add_basemap(ax, crs="EPSG:3857",
                    source=cx.providers.CartoDB.Positron,
-                   zoom=15, alpha=0.6)
+                   zoom=15, alpha=0.5)
 
     # ── Base layers ───────────────────────────────────────────
     if not buildings.empty:
@@ -430,9 +431,9 @@ def generate_transport(data_type: str, value: str,
         try:
             rc = gpd.clip(roads, clip_gdf)
             if not rc.empty:
-                rc.plot(ax=ax, color=COLOR_ROADS, linewidth=1.4, zorder=3)
+                rc.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
         except Exception:
-            roads.plot(ax=ax, color=COLOR_ROADS, linewidth=1.4, zorder=3)
+            roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
 
     # ── MTR routes ────────────────────────────────────────────
     lines_on_map: dict = {}
@@ -460,6 +461,7 @@ def generate_transport(data_type: str, value: str,
                 log.warning("[transport] No name column — drawing default color")
                 mtr_vis.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                 mtr_vis.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
+                lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
             else:
                 mtr_vis = mtr_vis.copy()
                 mtr_vis["_cname"] = mtr_vis[name_col].apply(_clean_name)
@@ -483,16 +485,16 @@ def generate_transport(data_type: str, value: str,
                         lines_on_map[lc] = official
 
                     try:
-                        merged = grp.union_all()
-                        if merged.length < 600:
+                        merged = grp.geometry.unary_union
+                        if merged is None or merged.is_empty or merged.length < 600:
                             continue
                         mid   = merged.interpolate(0.5, normalized=True)
-                        off_y = sum(170 for pp in placed_lbl_pts
+                        off_y = sum(150 for pp in placed_lbl_pts
                                     if mid.distance(pp) < 500)
                         lp = Point(mid.x, mid.y + off_y)
                         placed_lbl_pts.append(lp)
                         if xmin <= lp.x <= xmax and ymin <= lp.y <= ymax:
-                            ax.text(lp.x, lp.y, _make_label(cname),
+                            ax.text(lp.x, lp.y, cname.upper(),
                                     fontsize=9, weight="bold", color=lc,
                                     ha="center", va="center", zorder=12,
                                     bbox=dict(facecolor="white", edgecolor="none",
@@ -503,8 +505,11 @@ def generate_transport(data_type: str, value: str,
                 if not unnamed.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                     unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
+                    if DEFAULT_MTR_COLOR not in lines_on_map:
+                        lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
 
     # ── Light rail ────────────────────────────────────────────
+    light_rail_plotted = False
     if not light_rail.empty:
         try:
             lrc = gpd.clip(light_rail, clip_gdf)
@@ -513,6 +518,7 @@ def generate_transport(data_type: str, value: str,
         if not lrc.empty:
             lrc.plot(ax=ax, color="white",          linewidth=6,   zorder=4)
             lrc.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
+            light_rail_plotted = True
 
     # ── Stations ──────────────────────────────────────────────
     if not stations.empty:
@@ -536,6 +542,18 @@ def generate_transport(data_type: str, value: str,
                 c = get_mtr_color(name_str)
                 if c != DEFAULT_MTR_COLOR:
                     fb_color = c
+                elif not mtr_routes.empty and "name" in mtr_routes.columns:
+                    min_dist = float("inf")
+                    for lname, grp in mtr_routes.groupby("name"):
+                        if not isinstance(lname, str):
+                            continue
+                        merged_line = grp.geometry.unary_union
+                        if merged_line is None or merged_line.is_empty:
+                            continue
+                        d = merged_line.distance(pt)
+                        if d < min_dist:
+                            min_dist = d
+                            fb_color = get_mtr_color(lname)
             _draw_station(ax, sx, sy, zoom=STATION_LOGO_ZOOM,
                           fallback_color=fb_color, zorder=9)
             if name_str:
@@ -568,8 +586,9 @@ def generate_transport(data_type: str, value: str,
 
     # ── Legend ────────────────────────────────────────────────
     legend_handles = []
-    legend_handles.append(
-        mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail"))
+    if light_rail_plotted:
+        legend_handles.append(
+            mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail"))
 
     seen_lc = set()
     for _, color, label in MTR_LEGEND_LINES:
@@ -577,6 +596,11 @@ def generate_transport(data_type: str, value: str,
             legend_handles.append(
                 mlines.Line2D([], [], color=color, linewidth=4, label=label))
             seen_lc.add(color)
+
+    if DEFAULT_MTR_COLOR in lines_on_map and DEFAULT_MTR_COLOR not in seen_lc:
+        legend_handles.append(
+            mlines.Line2D([], [], color=DEFAULT_MTR_COLOR, linewidth=4, label="MTR"))
+        seen_lc.add(DEFAULT_MTR_COLOR)
 
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation"))
