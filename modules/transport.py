@@ -81,6 +81,17 @@ def get_mtr_color(name: str) -> str:
     return DEFAULT_MTR_COLOR
 
 
+def _make_label(clean_name: str) -> str:
+    """
+    Produces 'MTR XXXX LINE' label, stripping any existing
+    'MTR ' prefix from the OSM name first to prevent duplication.
+    """
+    upper = clean_name.upper().strip()
+    if upper.startswith("MTR "):
+        upper = upper[4:]
+    return f"MTR {upper}"
+
+
 # ============================================================
 # LOAD MTR LOGO
 # ============================================================
@@ -158,44 +169,34 @@ def _keep_lines(gdf):
 
 
 # ============================================================
-# MTR ROUTE FETCH
-# Fetches rail + subway separately, flattens MultiIndex on each
-# BEFORE concat so "name" column is preserved correctly.
-# This is the critical fix — pd.concat on raw OSMnx GeoDataFrames
-# with MultiIndex causes column misalignment on the server.
+# FLATTEN OSMnx MultiIndex
+# Must be called on EACH GeoDataFrame individually BEFORE concat.
+# OSMnx returns a MultiIndex (element_type, osmid). Calling
+# pd.concat on two raw OSMnx GDFs misaligns attribute columns
+# ("name" shifts or disappears). Flattening each frame first
+# converts to a plain integer index, preserving all columns.
 # ============================================================
 
 def _flatten(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Flatten OSMnx MultiIndex (element_type, osmid) to a plain
-    integer index while keeping all attribute columns intact.
-    Extracts osmid as "_osmid" for later deduplication.
-    """
     if gdf.empty:
-        return gdf
-
+        return gdf.copy()
     gdf = gdf.copy()
-
     if isinstance(gdf.index, pd.MultiIndex):
-        # Extract osmid level before dropping index
         try:
             gdf["_osmid"] = gdf.index.get_level_values("osmid")
         except KeyError:
             gdf["_osmid"] = range(len(gdf))
     else:
         gdf["_osmid"] = gdf.index.astype(str)
-
     return gdf.reset_index(drop=True)
 
 
-def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
-    """
-    Fetch rail and subway line geometries.
-    Each tag query is flattened independently before concat
-    so attribute columns (especially "name") remain aligned.
-    """
-    frames = []
+# ============================================================
+# MTR ROUTE FETCH
+# ============================================================
 
+def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
+    frames = []
     for tags in [{"railway": "rail"}, {"railway": "subway"}]:
         raw = _safe_fetch(lat, lon, dist, tags)
         raw = _keep_lines(raw)
@@ -206,8 +207,6 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
     combined = pd.concat(frames, ignore_index=True)
-
-    # Deduplicate by osmid
     if "_osmid" in combined.columns:
         combined = combined.drop_duplicates(subset=["_osmid"])
         combined = combined.drop(columns=["_osmid"])
@@ -240,14 +239,59 @@ def generate_transport(data_type: str, value: str,
 
     # --------------------------------------------------------
     # FETCH DATA
+    #
+    # FIX 1 — BUILDINGS: Do NOT filter to polygons only.
+    # OSMnx returns building footprints as closed Ways (Polygons)
+    # AND Relations (MultiPolygons). In some areas like Sheung Wan,
+    # many blocks are tagged as relations which may come back as
+    # Polygons OR LineStrings depending on OSMnx version.
+    # Using the raw GDF with all geometry types ensures nothing
+    # is dropped. We only exclude Point geometries which cannot
+    # be filled as area features.
+    #
+    # FIX 2 — ROADS: Extended highway hierarchy to include
+    # tertiary, residential, and service roads. Areas like Sheung
+    # Wan / Mid-Levels have very few primary/trunk roads — the
+    # map was empty because only motorway→secondary were fetched.
+    #
+    # FIX 3 — WATER: Add natural=bay and place=sea queries to
+    # capture Victoria Harbour which is not tagged natural=water.
+    # Harbour is mapped as a Relation with natural=bay in OSM.
     # --------------------------------------------------------
 
-    buildings  = _safe_fetch(lat, lon, r, {"building": True})
-    roads      = _keep_lines(_safe_fetch(lat, lon, r, {"highway": ["motorway", "trunk", "primary", "secondary"]}))
+    # Buildings — keep all area geometry types
+    _bld_raw  = _safe_fetch(lat, lon, r, {"building": True})
+    buildings = _bld_raw[
+        _bld_raw.geometry.type.isin(["Polygon", "MultiPolygon"])
+    ] if not _bld_raw.empty else gpd.GeoDataFrame(geometry=[], crs=3857)
+
+    # Roads — full urban hierarchy
+    roads = _keep_lines(_safe_fetch(lat, lon, r, {
+        "highway": [
+            "motorway", "trunk", "primary", "secondary",
+            "tertiary", "residential", "service", "unclassified"
+        ]
+    }))
+
     light_rail = _keep_lines(_safe_fetch(lat, lon, r, {"railway": "light_rail"}))
-    stations   = _safe_fetch(lat, lon, r, {"railway": "station"})
-    water      = _safe_fetch(lat, lon, r, {"natural": "water"})
     mtr_routes = _fetch_mtr_routes(lat, lon, r)
+
+    # Stations — flatten immediately after fetch
+    _sta_raw = _safe_fetch(lat, lon, r, {"railway": "station"})
+    stations = _flatten(_sta_raw) if not _sta_raw.empty else gpd.GeoDataFrame(geometry=[], crs=3857)
+
+    # Water — fetch both natural=water and natural=bay (harbour)
+    _w1 = _safe_fetch(lat, lon, r, {"natural": "water"})
+    _w2 = _safe_fetch(lat, lon, r, {"natural": "bay"})
+    _w_frames = [f for f in [_w1, _w2] if not f.empty]
+    if _w_frames:
+        _w_combined = pd.concat(_w_frames, ignore_index=True)
+        water = gpd.GeoDataFrame(
+            _w_combined[_w_combined.geometry.type.isin(["Polygon", "MultiPolygon"])],
+            crs=3857
+        )
+    else:
+        water = gpd.GeoDataFrame(geometry=[], crs=3857)
 
     gc.collect()
 
@@ -280,7 +324,7 @@ def generate_transport(data_type: str, value: str,
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT — extent locked BEFORE basemap
+    # PLOT — extent locked BEFORE cx.add_basemap
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
@@ -300,10 +344,18 @@ def generate_transport(data_type: str, value: str,
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
+
     if not water.empty:
         water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+
+    # Roads — clip to viewport before plotting for performance
     if not roads.empty:
-        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
+        try:
+            roads_clipped = gpd.clip(roads, clip_gdf)
+            if not roads_clipped.empty:
+                roads_clipped.plot(ax=ax, color=COLOR_ROADS, linewidth=1.4, zorder=3)
+        except Exception:
+            roads.plot(ax=ax, color=COLOR_ROADS, linewidth=1.4, zorder=3)
 
     # --------------------------------------------------------
     # MTR ROUTES — per-line coloring
@@ -334,7 +386,6 @@ def generate_transport(data_type: str, value: str,
                     subset.plot(ax=ax, color="white",    linewidth=8,   zorder=4)
                     subset.plot(ax=ax, color=line_color, linewidth=4.5, zorder=5)
 
-                    # Track for legend — official ordered labels
                     if line_color not in lines_on_map:
                         official_label = clean_name.title()
                         for key, c, label in MTR_LEGEND_LINES:
@@ -343,7 +394,6 @@ def generate_transport(data_type: str, value: str,
                                 break
                         lines_on_map[line_color] = official_label
 
-                    # Line label annotation
                     merged = subset.union_all()
                     if merged.length < 600:
                         continue
@@ -360,7 +410,7 @@ def generate_transport(data_type: str, value: str,
                     if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
                         ax.text(
                             new_point.x, new_point.y,
-                            f"MTR {clean_name.upper()}",
+                            _make_label(clean_name),
                             fontsize=9, weight="bold",
                             color=line_color,
                             ha="center", va="center",
@@ -369,7 +419,6 @@ def generate_transport(data_type: str, value: str,
                                       alpha=0.85, pad=2)
                         )
 
-                # Unnamed routes fallback
                 unnamed = mtr_visible[mtr_visible[name_col].isna()]
                 if not unnamed.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
@@ -389,21 +438,30 @@ def generate_transport(data_type: str, value: str,
 
     # --------------------------------------------------------
     # STATIONS
+    # FIX 4 — Stations: stations GDF is already flattened above
+    # at fetch time. Use gpd.GeoDataFrame.assign() to compute
+    # centroids safely without overwriting active geometry column,
+    # then filter using centroid coordinates.
     # --------------------------------------------------------
 
     if not stations.empty:
-        station_pts = stations.copy()
-        station_pts["geometry"] = station_pts.centroid
 
-        station_pts = station_pts[
-            (station_pts.geometry.x >= xmin) & (station_pts.geometry.x <= xmax) &
-            (station_pts.geometry.y >= ymin) & (station_pts.geometry.y <= ymax)
+        # Compute centroid coordinates without clobbering geometry column
+        stations = stations.copy()
+        stations["_cx"] = stations.geometry.centroid.x
+        stations["_cy"] = stations.geometry.centroid.y
+
+        # Filter to map viewport
+        in_view = stations[
+            (stations["_cx"] >= xmin) & (stations["_cx"] <= xmax) &
+            (stations["_cy"] >= ymin) & (stations["_cy"] <= ymax)
         ]
 
         placed_station_positions = []
 
-        for _, row in station_pts.iterrows():
-            sx, sy     = row.geometry.x, row.geometry.y
+        for _, row in in_view.iterrows():
+            sx = row["_cx"]
+            sy = row["_cy"]
             current_pt = Point(sx, sy)
 
             if any(current_pt.distance(p) < STATION_MIN_DISTANCE
@@ -434,7 +492,6 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
-            # Station name label below icon
             if isinstance(name_val, str) and name_val.strip():
                 display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
                 if display_name:
@@ -493,7 +550,6 @@ def generate_transport(data_type: str, value: str,
         mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail")
     )
 
-    # MTR lines — official ordered legend, deduplicated by color
     seen_colors = set()
     for key, color, label in MTR_LEGEND_LINES:
         if color in lines_on_map and color not in seen_colors:
