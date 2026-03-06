@@ -81,7 +81,7 @@ def get_mtr_color(name: str) -> str:
 
 
 # ============================================================
-# LOAD MTR LOGO — same pattern as driving.py
+# LOAD MTR LOGO
 # ============================================================
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -116,7 +116,7 @@ def _draw_roundel_fallback(ax, x, y, size=60, color="#ED1D24", zorder=9):
 
 
 # ============================================================
-# DRAW STATION — same pattern as driving.py _add_mtr_icon
+# DRAW STATION
 # ============================================================
 
 def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
@@ -140,7 +140,6 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 # MAIN GENERATOR
 # ============================================================
 
-# ── Main generator ────────────────────────────────────────────
 def generate_transport(data_type: str, value: str,
                        radius_m: Optional[int] = None,
                        lon: float = None, lat: float = None,
@@ -150,6 +149,7 @@ def generate_transport(data_type: str, value: str,
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     r = radius_m if radius_m is not None else MAP_RADIUS
     lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
+
     if lot_gdf is not None:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
@@ -203,14 +203,41 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT
+    # MAP EXTENT — computed before any plotting
+    # --------------------------------------------------------
+
+    xmin = site_point.x - 1600
+    xmax = site_point.x + 2200
+    ymin = site_point.y - 1100
+    ymax = site_point.y + 1100
+
+    clip_box = box(xmin, ymin, xmax, ymax)
+    clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
+
+    # --------------------------------------------------------
+    # PLOT SETUP
+    # CRITICAL ORDER: set xlim/ylim BEFORE cx.add_basemap so
+    # contextily fetches tiles at the correct location and zoom.
+    # geopandas .plot() calls will reset limits — re-lock after
+    # all layers are drawn.
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron, zoom=15, alpha=0.5)
+    # Step 1 — lock extent
+    ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymin, ymax)
+
+    # Step 2 — basemap (uses locked extent to fetch correct tiles)
+    cx.add_basemap(ax, crs="EPSG:3857",
+                   source=cx.providers.CartoDB.Positron,
+                   zoom=15, alpha=0.5)
+
+    # --------------------------------------------------------
+    # BASE LAYERS
+    # --------------------------------------------------------
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
@@ -285,7 +312,7 @@ def generate_transport(data_type: str, value: str,
                     if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
                         ax.text(
                             new_point.x, new_point.y,
-                            clean_name.upper(),
+                            f"MTR {clean_name.upper()}",
                             fontsize=9, weight="bold",
                             color=line_color,
                             ha="center", va="center",
@@ -313,7 +340,7 @@ def generate_transport(data_type: str, value: str,
         light_rail.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
 
     # --------------------------------------------------------
-    # STATIONS — MTR logo, deduplicated to prevent overlap
+    # STATIONS — MTR logo, deduplicated + station name label
     # --------------------------------------------------------
 
     if not stations.empty:
@@ -365,6 +392,21 @@ def generate_transport(data_type: str, value: str,
                           fallback_color=fallback_color,
                           zorder=9)
 
+            # Station name label below icon
+            if isinstance(name_val, str) and name_val.strip():
+                display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
+                if display_name:
+                    ax.text(
+                        sx, sy - 130,
+                        display_name,
+                        fontsize=7.5, weight="bold",
+                        ha="center", va="top",
+                        color="#333333",
+                        zorder=10,
+                        bbox=dict(facecolor="white", edgecolor="none",
+                                  alpha=0.7, pad=1.5)
+                    )
+
     # --------------------------------------------------------
     # SITE
     # --------------------------------------------------------
@@ -393,25 +435,22 @@ def generate_transport(data_type: str, value: str,
             ha='center', va='bottom', fontsize=12)
 
     # --------------------------------------------------------
-    # EXTENT
+    # RE-LOCK EXTENT — geopandas .plot() resets limits after each call
     # --------------------------------------------------------
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
-    ax.set_aspect("equal")
 
     # --------------------------------------------------------
-    # LEGEND — small, clean, deduplicated, ordered
+    # LEGEND
     # --------------------------------------------------------
 
     legend_handles = []
 
-    # Light Rail
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail")
     )
 
-    # MTR lines on map — official order, deduplicated by color
     seen_colors_legend = set()
     for key, color, label in MTR_LEGEND_LINES:
         if color in lines_on_map and color not in seen_colors_legend:
@@ -420,19 +459,14 @@ def generate_transport(data_type: str, value: str,
             )
             seen_colors_legend.add(color)
 
-    # Vehicle Circulation
     legend_handles.append(
         mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation")
     )
-
-    # Site
     legend_handles.append(
         mpatches.Patch(facecolor=COLOR_SITE, label="Site")
     )
 
-    # MTR Station — logo thumbnail or fallback circle
     if MTR_LOGO_LOADED and _mtr_img is not None:
-        # Use PIL to resize for legend thumbnail
         pil_thumb = Image.fromarray(
             ((_mtr_img * 255).astype(np.uint8)
              if _mtr_img.dtype != np.uint8 else _mtr_img)
@@ -475,7 +509,7 @@ def generate_transport(data_type: str, value: str,
         handles=legend_handles,
         handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
         loc="lower left",
-        bbox_to_anchor=(0.02, 0.15),
+        bbox_to_anchor=(0.02, 0.02),
         frameon=True,
         facecolor="white",
         edgecolor="black",
@@ -501,8 +535,8 @@ def generate_transport(data_type: str, value: str,
     ax.set_axis_off()
 
     buffer = BytesIO()
-    plt.tight_layout()
-    plt.savefig(buffer, format="png", dpi=200)
+    plt.savefig(buffer, format="png", dpi=200,
+                bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     gc.collect()
 
