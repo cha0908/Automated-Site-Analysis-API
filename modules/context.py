@@ -19,14 +19,13 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 from modules.resolver import resolve_location, get_lot_boundary
 
-# Per-request OSMnx timeout — short so each fetch fails fast if slow
 ox.settings.use_cache        = True
 ox.settings.log_console      = False
 ox.settings.requests_timeout = 18
 
 log = logging.getLogger(__name__)
 
-FETCH_RADIUS     = 800
+FETCH_RADIUS     = 600   # smaller = faster OSMnx queries
 MAP_HALF_SIZE    = 600
 MTR_COLOR        = "#ffd166"
 
@@ -196,7 +195,26 @@ def _polys_only(gdf):
 
 
 def _get_name(gdf):
-    return _col(gdf, "name:en").fillna(_col(gdf, "name"))
+    """Prefer English name, fall back to name — return None if non-ASCII."""
+    raw = _col(gdf, "name:en").fillna(_col(gdf, "name"))
+    return raw
+
+
+def _ascii_only(text: str) -> Optional[str]:
+    """Return text if it contains mostly ASCII letters, else None."""
+    if not text or not isinstance(text, str):
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    # Count printable ASCII letters (a-z, A-Z, 0-9, space, punctuation)
+    ascii_chars = sum(1 for c in stripped if ord(c) < 128)
+    # Reject if less than 50% ASCII (catches mostly-Chinese strings)
+    if ascii_chars / max(len(stripped), 1) < 0.5:
+        return None
+    # Remove any remaining non-ASCII characters inline
+    cleaned = "".join(c for c in stripped if ord(c) < 128).strip()
+    return cleaned if cleaned else None
 
 
 def _safe_plot(gdf, ax, **kwargs):
@@ -282,7 +300,7 @@ def generate_context(
                      {"amenity": ["school", "college", "university", "hospital"],
                       "leisure": ["park"],
                       "place":   ["neighbourhood", "suburb"]}),
-    }, wall_timeout=55)
+    }, wall_timeout=110)
     gc.collect()
 
     # ── Process base ──────────────────────────────────────────────────────────
@@ -337,7 +355,10 @@ def generate_context(
         named    = g.dropna(subset=["_lb"])
         named    = named[named["_lb"].astype(str).str.strip().str.len() > 0]
         for _, row in named.iterrows():
-            text = str(row["_lb"]).strip()
+            raw  = str(row["_lb"]).strip()
+            text = _ascii_only(raw)   # drop Chinese / non-ASCII names
+            if not text:
+                continue
             if text in seen_texts:
                 continue
             seen_texts.add(text)
@@ -458,8 +479,11 @@ def generate_context(
                 raw = st.get("name")
                 if not raw or not isinstance(raw, str) or not str(raw).strip():
                     continue
+                label = _ascii_only(str(raw).strip())
+                if not label:
+                    continue
                 c = st.geometry.centroid
-                ax.text(c.x, c.y + 140, wrap_label(str(raw).strip(), 18),
+                ax.text(c.x, c.y + 140, wrap_label(label, 18),
                         fontsize=9, weight="bold", color="black",
                         ha="center", va="bottom",
                         bbox=dict(facecolor="white", edgecolor="none",
