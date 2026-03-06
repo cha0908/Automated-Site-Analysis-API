@@ -140,46 +140,68 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 
 # ============================================================
 # SAFE MTR ROUTE FETCH
-# Fetches rail/subway features using multiple tag passes and
-# merges results — captures tunnel segments and named routes
-# that a single query may miss.
+# ox.features_from_point returns a GeoDataFrame with a
+# MultiIndex (element_type, osmid). After concat we must
+# flatten to a plain integer index while PRESERVING the
+# "name" column — reset_index(drop=False) was promoting
+# osmid into a column which shadowed or displaced "name".
 # ============================================================
 
 def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
     """
-    Fetch all MTR/rail route geometries robustly.
-    Uses three separate OSM queries and concatenates results,
-    deduplicating by osmid to avoid double-rendering.
+    Fetch all MTR/rail route line geometries using three separate
+    OSM tag queries. Results are concatenated and deduplicated by
+    osmid without disturbing the "name" attribute column.
     """
     frames = []
 
     tag_sets = [
-        {"railway": "rail"},           # surface + tunnel rail (Island, East Rail, etc.)
-        {"railway": "subway"},         # subway-tagged lines
-        {"railway": "monorail"},       # future-proof
+        {"railway": "rail"},
+        {"railway": "subway"},
+        {"railway": "monorail"},
     ]
 
     for tags in tag_sets:
         try:
             gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
-            if not gdf.empty:
-                # Keep only LineString / MultiLineString geometry types
-                gdf = gdf[gdf.geometry.type.isin(["LineString", "MultiLineString"])]
-                if not gdf.empty:
-                    frames.append(gdf.to_crs(3857))
+            if gdf.empty:
+                continue
+
+            # Keep only line geometries
+            gdf = gdf[gdf.geometry.type.isin(["LineString", "MultiLineString"])].copy()
+            if gdf.empty:
+                continue
+
+            gdf = gdf.to_crs(3857)
+
+            # ── Extract osmid from MultiIndex before flattening ──
+            # ox returns MultiIndex: (element_type, osmid)
+            # We pull osmid out as a plain column so we can dedup later
+            if isinstance(gdf.index, pd.MultiIndex):
+                gdf = gdf.copy()
+                gdf["_osmid"] = gdf.index.get_level_values("osmid")
+                gdf = gdf.reset_index(drop=True)   # flatten index, keep all columns
+            else:
+                gdf["_osmid"] = gdf.index
+                gdf = gdf.reset_index(drop=True)
+
+            frames.append(gdf)
+
         except Exception:
             continue
 
     if not frames:
         return gpd.GeoDataFrame(geometry=[], crs=3857)
 
-    combined = pd.concat(frames)
+    # Concatenate all fetched frames
+    combined = pd.concat(frames, ignore_index=True)
 
-    # Deduplicate by osmid index level if present
-    if combined.index.names and combined.index.names[0] is not None:
-        combined = combined[~combined.index.duplicated(keep="first")]
+    # Deduplicate by osmid — keep first occurrence
+    if "_osmid" in combined.columns:
+        combined = combined.drop_duplicates(subset=["_osmid"])
+        combined = combined.drop(columns=["_osmid"])
 
-    return combined.reset_index(drop=False)
+    return combined.reset_index(drop=True)
 
 
 # ============================================================
@@ -232,8 +254,6 @@ def generate_transport(data_type: str, value: str,
     light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
     stations   = safe_fetch({"railway": "station"})
     water      = safe_fetch({"natural": "water"})
-
-    # ── FIX: use robust multi-pass fetch that captures tunnel rail ──
     mtr_routes = _fetch_mtr_routes(lat, lon, r)
 
     gc.collect()
@@ -252,15 +272,11 @@ def generate_transport(data_type: str, value: str,
         site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
     # --------------------------------------------------------
-    # MAP EXTENT
-    # ── FIX: symmetric extent so site stays centred and MTR
-    #    lines on all sides are captured in clip_box.
-    #    Original asymmetric (-1600 / +2200) was shifting the
-    #    viewport east and cutting western/central MTR lines.
+    # MAP EXTENT — symmetric, site centred
     # --------------------------------------------------------
 
-    HALF_W = 1900   # half-width  → total width  3800 m
-    HALF_H = 1100   # half-height → total height 2200 m
+    HALF_W = 1900
+    HALF_H = 1100
 
     xmin = site_point.x - HALF_W
     xmax = site_point.x + HALF_W
@@ -271,19 +287,16 @@ def generate_transport(data_type: str, value: str,
     clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
 
     # --------------------------------------------------------
-    # PLOT SETUP
-    # CRITICAL: set xlim/ylim BEFORE cx.add_basemap
+    # PLOT SETUP — extent locked BEFORE basemap
     # --------------------------------------------------------
 
     fig, ax = plt.subplots(figsize=(18, 10))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    # Step 1 — lock extent FIRST
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    # Step 2 — basemap uses locked extent to fetch correct tiles
     cx.add_basemap(ax, crs="EPSG:3857",
                    source=cx.providers.CartoDB.Positron,
                    zoom=15, alpha=0.5)
@@ -312,6 +325,8 @@ def generate_transport(data_type: str, value: str,
         if not mtr_visible.empty:
 
             placed_positions = []
+
+            # "name" column must exist as a plain column after our fetch fix
             name_col = "name" if "name" in mtr_visible.columns else None
 
             if name_col:
@@ -361,12 +376,14 @@ def generate_transport(data_type: str, value: str,
                                       alpha=0.85, pad=2)
                         )
 
+                # Unnamed fallback
                 unnamed = mtr_visible[mtr_visible[name_col].isna()]
                 if not unnamed.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                     unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
 
             else:
+                # No name column at all — render all with default color
                 mtr_visible.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
                 mtr_visible.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
 
