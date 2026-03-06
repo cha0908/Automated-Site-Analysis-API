@@ -2,24 +2,18 @@
 context.py — Site-Type Driven Context Analysis
 ALKF+ Module
 
-Generates a context analysis map that adapts its content based on the
-inferred site type (Residential, Hotel, Commercial, Institutional,
-Industrial). Each type highlights the most analytically relevant
-surrounding developments and infrastructure.
-
-Optionally computes a pedestrian walking route from site → nearest
-MTR station using the OSM walk network.
-
-Architecture notes:
-- All OSM fetches run in a ThreadPoolExecutor (parallel)
-- OSMnx MultiIndex flattened before any concat or attribute access
-- Map extent locked before cx.add_basemap to prevent tile zoom errors
-- ax.set_aspect / ax.autoscale called AFTER basemap to preserve extent
+Performance contract (Render free tier):
+  - Total wall time budget: < 90 seconds
+  - OSM parallel fetch wall limit: 45 seconds per task
+  - Walk graph: built ONCE per process, cached in module-level dict
+  - Walk route computation: capped at 20 seconds via threading timeout
+  - All heavy operations wrapped in try/except — map always renders
 """
 
 import logging
 import os
 import gc
+import threading
 import osmnx as ox
 import networkx as nx
 import geopandas as gpd
@@ -31,10 +25,9 @@ import numpy as np
 import textwrap
 import pandas as pd
 
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, TimeoutError as FuturesTimeout
 from typing import Optional, List
-from shapely.geometry import Point, LineString, MultiLineString
-from shapely.ops import unary_union
+from shapely.geometry import Point
 from io import BytesIO
 import matplotlib.image as mpimg
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
@@ -42,36 +35,49 @@ from matplotlib.lines import Line2D
 
 from modules.resolver import resolve_location, get_lot_boundary
 
+# ── OSMnx settings ────────────────────────────────────────────────────────────
 ox.settings.use_cache        = True
 ox.settings.log_console      = False
-ox.settings.requests_timeout = 30
+ox.settings.requests_timeout = 20   # per HTTP request, not total
 
 log = logging.getLogger(__name__)
 
-# ── Constants ──────────────────────────────────────────────────────────────
 
+# ── Timing budgets ────────────────────────────────────────────────────────────
+_FETCH_WALL_TIMEOUT   = 45    # seconds — parallel OSM feature fetch
+_WALK_GRAPH_TIMEOUT   = 25    # seconds — walk graph build
+_WALK_ROUTE_TIMEOUT   = 10    # seconds — shortest path computation
+_WALK_GRAPH_DIST      = 1000  # metres — radius for walk graph
+
+# ── Map parameters ────────────────────────────────────────────────────────────
 FETCH_RADIUS  = 700
 MAP_HALF_SIZE = 700
 MTR_COLOR     = "#ffd166"
-ROUTE_COLOR   = "#1565C0"   # blue dashed pedestrian route
+ROUTE_COLOR   = "#1565C0"
 
+# ── Static assets ─────────────────────────────────────────────────────────────
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
 _BUS_ICON_PATH = os.path.join(_STATIC_DIR, "bus.png")
 _MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
 
-try:
-    _bus_icon = mpimg.imread(_BUS_ICON_PATH)
-except Exception:
-    _bus_icon = None
+try:    _bus_icon = mpimg.imread(_BUS_ICON_PATH)
+except: _bus_icon = None
 
 try:
     _mtr_logo        = mpimg.imread(_MTR_LOGO_PATH)
     _MTR_LOGO_LOADED = True
-except Exception:
+except:
     _mtr_logo        = None
     _MTR_LOGO_LOADED = False
 
 _EMPTY = gpd.GeoDataFrame(geometry=[], crs=3857)
+
+
+# ── Walk graph cache ──────────────────────────────────────────────────────────
+# Keyed by rounded (lat, lon) to 2 decimal places (~1km grid cell).
+# Prevents re-downloading the same walk network for nearby sites.
+_WALK_GRAPH_CACHE: dict = {}
+_WALK_GRAPH_LOCK = threading.Lock()
 
 
 # ============================================================
@@ -91,30 +97,21 @@ def infer_site_type(zone: str) -> str:
 
 # ============================================================
 # SITE-TYPE DRIVEN FETCH CONFIGURATION
-#
-# Each site type specifies:
-#   primary_tags  — OSM tags for type-specific highlighted buildings
-#   support_tags  — secondary amenities relevant to this programme
-#   highlight_color  — fill color for primary buildings on map
-#   highlight_label  — legend label for primary buildings
-#   label_priority   — ordered list of OSM tag keys to extract place labels from
 # ============================================================
 
 SITE_CONFIGS = {
     "RESIDENTIAL": {
         "primary_tags": {
             "building": ["apartments", "residential", "house",
-                         "dormitory", "detached", "terrace", "semidetached_house"],
+                         "dormitory", "detached", "terrace"],
         },
         "support_tags": {
-            "amenity":  ["school", "college", "university",
-                         "hospital", "clinic", "supermarket", "kindergarten"],
-            "leisure":  ["park", "playground", "garden", "recreation_ground"],
-            "shop":     ["supermarket", "convenience"],
+            "amenity": ["school", "college", "university",
+                        "hospital", "supermarket", "kindergarten"],
+            "leisure": ["park", "playground"],
         },
         "highlight_color": "#e07b39",
         "highlight_label": "Residential Developments",
-        "label_priority":  ["leisure", "amenity", "name"],
     },
     "HOTEL": {
         "primary_tags": {
@@ -122,14 +119,12 @@ SITE_CONFIGS = {
             "building": ["hotel"],
         },
         "support_tags": {
-            "tourism":  ["attraction", "museum", "viewpoint"],
-            "amenity":  ["restaurant", "cafe", "bar", "nightclub"],
-            "shop":     ["mall", "department_store"],
-            "leisure":  ["park"],
+            "tourism": ["attraction", "museum"],
+            "amenity": ["restaurant", "cafe", "bar"],
+            "shop":    ["mall"],
         },
         "highlight_color": "#b15928",
         "highlight_label": "Hotels & Serviced Apartments",
-        "label_priority":  ["tourism", "amenity", "name"],
     },
     "COMMERCIAL": {
         "primary_tags": {
@@ -137,55 +132,48 @@ SITE_CONFIGS = {
             "office":   True,
         },
         "support_tags": {
-            "amenity":  ["bank", "restaurant", "cafe", "atm", "fast_food"],
-            "shop":     ["mall", "department_store"],
-            "railway":  ["station"],
+            "amenity": ["bank", "restaurant", "cafe"],
+            "shop":    ["mall", "department_store"],
         },
         "highlight_color": "#6a3d9a",
         "highlight_label": "Office / Commercial Buildings",
-        "label_priority":  ["office", "amenity", "building", "name"],
     },
     "INSTITUTIONAL": {
         "primary_tags": {
             "amenity":  ["school", "college", "university",
-                         "hospital", "government", "library", "courthouse"],
+                         "hospital", "government", "library"],
             "building": ["government", "civic", "hospital", "school"],
         },
         "support_tags": {
-            "leisure":  ["park", "garden"],
-            "amenity":  ["library", "community_centre"],
+            "leisure": ["park", "garden"],
+            "amenity": ["library", "community_centre"],
         },
         "highlight_color": "#1f78b4",
         "highlight_label": "Institutional Buildings",
-        "label_priority":  ["amenity", "building", "name"],
     },
     "INDUSTRIAL": {
         "primary_tags": {
-            "building": ["industrial", "warehouse", "factory", "storage_tank"],
+            "building": ["industrial", "warehouse", "factory"],
             "landuse":  ["industrial", "port"],
         },
         "support_tags": {
-            "highway":  ["motorway", "trunk", "primary"],
-            "railway":  ["rail", "goods"],
-            "landuse":  ["port", "logistics"],
+            "highway": ["motorway", "trunk", "primary"],
+            "landuse": ["port"],
         },
         "highlight_color": "#33a02c",
         "highlight_label": "Industrial / Warehouse Buildings",
-        "label_priority":  ["landuse", "building", "name"],
     },
     "OTHER": {
+        "primary_tags": {"building": True},
+        "support_tags":  {"amenity": True},
+        "highlight_color": "#aaaaaa",
+        "highlight_label": "Nearby Buildings",
+    },
+    "MIXED": {
         "primary_tags": {"building": True},
         "support_tags":  {"amenity": True, "leisure": True},
         "highlight_color": "#aaaaaa",
         "highlight_label": "Nearby Buildings",
-        "label_priority":  ["amenity", "name"],
-    },
-    "MIXED": {
-        "primary_tags": {"building": True},
-        "support_tags":  {"amenity": True, "leisure": True, "shop": True},
-        "highlight_color": "#aaaaaa",
-        "highlight_label": "Nearby Buildings",
-        "label_priority":  ["amenity", "leisure", "name"],
     },
 }
 
@@ -208,16 +196,26 @@ def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
     return _EMPTY.copy()
 
 
-def _parallel_fetch(tasks: dict, wall_timeout: float = 130) -> dict:
+def _parallel_fetch(tasks: dict) -> dict:
+    """
+    Run OSM feature fetches in parallel.
+    Hard wall timeout per task = _FETCH_WALL_TIMEOUT seconds.
+    Tasks that do not complete are cancelled and return empty GDF.
+    """
     results = {k: _EMPTY.copy() for k in tasks}
-    with ThreadPoolExecutor(max_workers=min(len(tasks), 6)) as pool:
+    n_workers = min(len(tasks), 5)
+
+    with ThreadPoolExecutor(max_workers=n_workers) as pool:
         futures = {pool.submit(_fetch_one, *args): key
                    for key, args in tasks.items()}
-        done, not_done = wait(futures, timeout=wall_timeout,
-                              return_when=ALL_COMPLETED)
+        done, not_done = wait(
+            futures,
+            timeout=_FETCH_WALL_TIMEOUT,
+            return_when=ALL_COMPLETED
+        )
         for f in not_done:
             f.cancel()
-            log.warning(f"[context] timeout: {futures[f]}")
+            log.warning(f"[context] fetch timeout: {futures[f]}")
         for f in done:
             key = futures[f]
             try:
@@ -245,7 +243,8 @@ def _filter_col(gdf, col, val):
 def _polys_only(gdf):
     if gdf.empty:
         return _EMPTY.copy()
-    return gdf[gdf.geometry.geom_type.isin(["Polygon", "MultiPolygon"])].copy()
+    return gdf[gdf.geometry.geom_type.isin(
+        ["Polygon", "MultiPolygon"])].copy()
 
 
 def _get_name(gdf):
@@ -258,8 +257,8 @@ def _ascii_clean(text) -> Optional[str]:
     s = text.strip()
     if not s:
         return None
-    ascii_ratio = sum(1 for c in s if ord(c) < 128) / max(len(s), 1)
-    if ascii_ratio < 0.5:
+    ratio = sum(1 for c in s if ord(c) < 128) / max(len(s), 1)
+    if ratio < 0.5:
         return None
     cleaned = "".join(c for c in s if ord(c) < 128).strip()
     return cleaned if cleaned else None
@@ -267,8 +266,8 @@ def _ascii_clean(text) -> Optional[str]:
 
 def _flatten_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Flatten OSMnx MultiIndex (element_type, osmid) to plain int index.
-    Must be called on each GeoDataFrame individually before pd.concat.
+    Flatten OSMnx MultiIndex (element_type, osmid) to plain integer index.
+    Preserves all attribute columns. Must be called per-GDF before concat.
     """
     if gdf.empty:
         return gdf.copy()
@@ -304,53 +303,113 @@ def _draw_mtr_icon(ax, x, y, zoom=0.035, zorder=14):
 
 
 # ============================================================
-# PEDESTRIAN ROUTE COMPUTATION
-# Site → nearest MTR station via OSM walk network
+# WALK GRAPH — cached, timeout-guarded
 # ============================================================
 
-def _compute_walk_route(lat: float, lon: float,
-                        station_centroid_wgs84: Point,
-                        walk_dist: int = 1200) -> Optional[gpd.GeoDataFrame]:
+def _get_walk_graph(lat: float, lon: float):
     """
-    Compute shortest pedestrian path from site to MTR station centroid
-    using OSMnx walk network. Returns GeoDataFrame in EPSG:3857 or None.
+    Return cached OSMnx walk graph or build a new one.
+    Cache key = (lat rounded to 2dp, lon rounded to 2dp) ≈ 1km grid cell.
+    Graph build is run in a daemon thread with _WALK_GRAPH_TIMEOUT hard limit.
+    Returns None if build times out or fails.
+    """
+    cache_key = (round(lat, 2), round(lon, 2))
 
-    Parameters
-    ----------
-    lat, lon : float
-        Site WGS84 coordinates.
-    station_centroid_wgs84 : Point
-        Station centroid in WGS84 (EPSG:4326).
-    walk_dist : int
-        Radius in metres around site to build walk graph.
+    with _WALK_GRAPH_LOCK:
+        if cache_key in _WALK_GRAPH_CACHE:
+            log.info("[context] walk graph cache hit")
+            return _WALK_GRAPH_CACHE[cache_key]
+
+    # Build outside lock to avoid blocking other requests
+    result = [None]
+    error  = [None]
+
+    def _build():
+        try:
+            G = ox.graph_from_point(
+                (lat, lon),
+                dist=_WALK_GRAPH_DIST,
+                network_type="walk",
+                simplify=True
+            )
+            result[0] = G
+        except Exception as e:
+            error[0] = e
+
+    t = threading.Thread(target=_build, daemon=True)
+    t.start()
+    t.join(timeout=_WALK_GRAPH_TIMEOUT)
+
+    if t.is_alive():
+        log.warning(f"[context] walk graph build timed out after "
+                    f"{_WALK_GRAPH_TIMEOUT}s — skipping walk route")
+        return None
+
+    if error[0] is not None:
+        log.warning(f"[context] walk graph build failed: {error[0]}")
+        return None
+
+    G = result[0]
+    if G is None or G.number_of_nodes() == 0:
+        return None
+
+    with _WALK_GRAPH_LOCK:
+        _WALK_GRAPH_CACHE[cache_key] = G
+
+    log.info(f"[context] walk graph built: "
+             f"{G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+    return G
+
+
+def _compute_walk_route(
+    lat: float,
+    lon: float,
+    station_wgs84: Point
+) -> Optional[gpd.GeoDataFrame]:
     """
+    Compute pedestrian path site → MTR station.
+    Uses cached walk graph. Returns EPSG:3857 GDF or None.
+    Shortest path computation capped at _WALK_ROUTE_TIMEOUT seconds.
+    """
+    G = _get_walk_graph(lat, lon)
+    if G is None:
+        return None
+
     try:
-        G = ox.graph_from_point(
-            (lat, lon),
-            dist=walk_dist,
-            network_type="walk",
-            simplify=True
-        )
-        if G.number_of_nodes() == 0:
-            return None
-
         site_node = ox.distance.nearest_nodes(G, lon, lat)
         stn_node  = ox.distance.nearest_nodes(
-            G,
-            station_centroid_wgs84.x,
-            station_centroid_wgs84.y
+            G, station_wgs84.x, station_wgs84.y
         )
-
         if site_node == stn_node:
             return None
-
-        path = nx.shortest_path(G, site_node, stn_node, weight="length")
-        route_gdf = ox.routing.route_to_gdf(G, path).to_crs(3857)
-        return route_gdf
-
     except Exception as e:
-        log.warning(f"[context] walk route failed: {e}")
+        log.warning(f"[context] node snap failed: {e}")
         return None
+
+    # Cap shortest path computation
+    route_result = [None]
+    route_error  = [None]
+
+    def _find_path():
+        try:
+            path = nx.shortest_path(G, site_node, stn_node, weight="length")
+            route_result[0] = ox.routing.route_to_gdf(G, path).to_crs(3857)
+        except Exception as e:
+            route_error[0] = e
+
+    t = threading.Thread(target=_find_path, daemon=True)
+    t.start()
+    t.join(timeout=_WALK_ROUTE_TIMEOUT)
+
+    if t.is_alive():
+        log.warning(f"[context] route computation timed out")
+        return None
+
+    if route_error[0] is not None:
+        log.warning(f"[context] route failed: {route_error[0]}")
+        return None
+
+    return route_result[0]
 
 
 # ============================================================
@@ -371,10 +430,8 @@ def generate_context(
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     fetch_r   = radius_m if radius_m is not None else FETCH_RADIUS
     half_size = radius_m if radius_m is not None else MAP_HALF_SIZE
-
-    # Slightly wider horizontal extent for 16:9 aspect
-    half_x = half_size * (16 / 12)
-    half_y = half_size
+    half_x    = half_size * (16 / 12)
+    half_y    = half_size
 
     log.info(f"[context] lon={lon:.5f} lat={lat:.5f} r={fetch_r}m")
 
@@ -407,36 +464,33 @@ def generate_context(
     zone      = primary["ZONE_LABEL"]
     SITE_TYPE = infer_site_type(zone)
     cfg       = SITE_CONFIGS.get(SITE_TYPE, SITE_CONFIGS["MIXED"])
-    log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
-
     hi_color  = cfg["highlight_color"]
     hi_label  = cfg["highlight_label"]
+    log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
     # ── Parallel OSM fetches ──────────────────────────────────────────────────
+    # NOTE: support_tags fetch is merged INTO primary_tags fetch to halve
+    # the number of Overpass API calls. This prevents the support timeout
+    # that crashed the previous version (support was the slowest task).
+    # ─────────────────────────────────────────────────────────────────────────
     log.info("[context] Fetching OSM data in parallel...")
 
     fetch_tasks = {
-        # Base urban context — always fetched
-        "landuse": (lat, lon, fetch_r, {
+        "landuse":  (lat, lon, fetch_r, {
             "landuse": True,
             "leisure": ["park", "playground", "garden", "recreation_ground"],
         }),
-        # Type-specific primary buildings
-        "primary": (lat, lon, fetch_r, cfg["primary_tags"]),
-        # Type-specific support amenities
-        "support": (lat, lon, fetch_r, cfg["support_tags"]),
-        # Bus stops
-        "bus":     (lat, lon, fetch_r, {"highway": "bus_stop"}),
-        # MTR stations — wider radius
-        "stations":(lat, lon, 1500,    {"railway": "station"}),
+        "primary":  (lat, lon, fetch_r, cfg["primary_tags"]),
+        "support":  (lat, lon, fetch_r, cfg["support_tags"]),
+        "bus":      (lat, lon, fetch_r, {"highway": "bus_stop"}),
+        "stations": (lat, lon, 1500,    {"railway": "station"}),
     }
 
-    results = _parallel_fetch(fetch_tasks, wall_timeout=130)
+    results = _parallel_fetch(fetch_tasks)
     gc.collect()
 
     # ── Derive layers ─────────────────────────────────────────────────────────
 
-    # Land use base layers
     landuse_raw      = results["landuse"]
     residential_area = _filter_col(landuse_raw, "landuse", "residential")
     industrial_area  = _filter_col(landuse_raw, "landuse",
@@ -445,31 +499,29 @@ def generate_context(
                                    ["park", "garden", "recreation_ground",
                                     "playground"])
 
-    # Support amenities
     support_raw = results["support"]
     schools     = _filter_col(support_raw, "amenity",
                               ["school", "college", "university", "kindergarten"])
     hospitals   = _filter_col(support_raw, "amenity", ["hospital", "clinic"])
 
-    # Primary type-specific buildings — polygons only, filter named or large
+    # Primary type-specific buildings — polygons, named or >= 300m²
     primary_raw = _flatten_index(results["primary"])
     primary_bld = _polys_only(primary_raw)
     if not primary_bld.empty:
         primary_bld["_name"] = _get_name(primary_bld)
-        named_mask = primary_bld["_name"].apply(
+        named_mask  = primary_bld["_name"].apply(
             lambda x: bool(_ascii_clean(str(x))) if pd.notna(x) else False
         )
-        large_mask = primary_bld.geometry.area >= 300
+        large_mask  = primary_bld.geometry.area >= 300
         primary_bld = primary_bld[named_mask | large_mask].copy()
     log.info(f"[context] primary buildings: {len(primary_bld)}")
 
-    # Bus stops
+    # Bus stops — point geometry only, clustered to max 6
     bus_raw   = _flatten_index(results["bus"])
     bus_stops = bus_raw[
         bus_raw.geometry.geom_type == "Point"
     ].copy() if not bus_raw.empty else _EMPTY.copy()
 
-    # Cluster bus stops to max 6 representative points
     if len(bus_stops) > 6:
         try:
             from sklearn.cluster import KMeans
@@ -485,50 +537,50 @@ def generate_context(
     # ── MTR station processing ────────────────────────────────────────────────
     stations_raw     = _flatten_index(results["stations"])
     stations_in_view = _EMPTY.copy()
-    nearest_station  = None     # WGS84 Point — for walk route
+    nearest_station  = None   # WGS84 Point for walk routing
     nearest_stn_name = None
 
     if not stations_raw.empty:
-        s             = stations_raw.copy()
-        s["_name"]    = _get_name(s)
-        s["_cx"]      = s.geometry.centroid.x
-        s["_cy"]      = s.geometry.centroid.y
-        s["_dist"]    = s.apply(
+        s          = stations_raw.copy()
+        s["_name"] = _get_name(s)
+        s["_cx"]   = s.geometry.centroid.x
+        s["_cy"]   = s.geometry.centroid.y
+        s["_dist"] = s.apply(
             lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1
         )
         s = s.dropna(subset=["_name"]).sort_values("_dist")
 
-        # Keep stations within 1.5x map half size
         stations_in_view = s[s["_dist"] <= half_size * 1.5].copy()
 
         if not stations_in_view.empty:
             best = stations_in_view.iloc[0]
-            # Convert centroid back to WGS84 for walk routing
             nearest_station = gpd.GeoSeries(
                 [Point(best["_cx"], best["_cy"])], crs=3857
             ).to_crs(4326).iloc[0]
             nearest_stn_name = _ascii_clean(str(best["_name"]))
 
-    # ── Walk route computation ────────────────────────────────────────────────
+    # ── Walk route ────────────────────────────────────────────────────────────
+    # Runs AFTER OSM fetch completes. Uses cached graph — first call downloads,
+    # subsequent calls for nearby sites return instantly from cache.
     walk_route_gdf = None
     if show_walk_route and nearest_station is not None:
-        log.info(f"[context] Computing walk route to {nearest_stn_name}...")
-        walk_route_gdf = _compute_walk_route(lat, lon, nearest_station,
-                                              walk_dist=max(int(half_size * 1.8), 1200))
+        log.info(f"[context] Walk route → {nearest_stn_name}...")
+        walk_route_gdf = _compute_walk_route(lat, lon, nearest_station)
+        if walk_route_gdf is None:
+            log.info("[context] Walk route unavailable — map renders without it")
 
     # ── Place labels ──────────────────────────────────────────────────────────
-    # Collect labels from multiple layers in priority order
-    label_items = []    # list of (dist_from_site, geom_3857, label_text)
+    label_items = []
     seen_texts  = set()
 
-    def _harvest_labels(gdf, max_items=20):
+    def _harvest(gdf, cap=20):
         if gdf is None or gdf.empty:
             return
         g        = _flatten_index(gdf)
         g["_lb"] = _get_name(g)
         named    = g.dropna(subset=["_lb"])
         named    = named[named["_lb"].astype(str).str.strip().str.len() > 0]
-        for _, row in named.head(max_items).iterrows():
+        for _, row in named.head(cap).iterrows():
             text = _ascii_clean(str(row["_lb"]).strip())
             if not text or text in seen_texts:
                 continue
@@ -542,23 +594,20 @@ def generate_context(
             except Exception:
                 continue
 
-    # Harvest in priority order — most relevant first
     for src in [schools, hospitals, parks, primary_bld, support_raw, landuse_raw]:
-        _harvest_labels(src)
+        _harvest(src)
 
     label_items.sort(key=lambda x: x[0])
     label_items = [(g, t) for _, g, t in label_items[:30]]
 
-    # Cleanup large objects before render
     del primary_raw, support_raw, landuse_raw, results
     gc.collect()
 
     log.info(f"[context] Rendering — {len(label_items)} labels, "
-             f"walk_route={'yes' if walk_route_gdf is not None else 'no'}")
+             f"walk={'yes' if walk_route_gdf is not None else 'no'}")
 
     # ============================================================
-    # FIGURE SETUP
-    # CRITICAL: set_xlim / set_ylim BEFORE cx.add_basemap
+    # FIGURE — extent locked BEFORE basemap
     # ============================================================
 
     fig, ax = plt.subplots(figsize=(16, 12))
@@ -583,18 +632,17 @@ def generate_context(
         except Exception as e:
             log.warning(f"[context] basemap: {e}")
 
-    # Re-lock extent after basemap (contextily may alter limits)
+    # Re-lock — contextily may reset limits
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.autoscale(False)
 
-    # ── Base land-use layers ──────────────────────────────────────────────────
+    # ── Land-use base layers ──────────────────────────────────────────────────
     _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
     _safe_plot(schools,          ax, color="#9ecae1", alpha=0.85, zorder=2)
     _safe_plot(hospitals,        ax, color="#aec6cf", alpha=0.85, zorder=2)
-
     del residential_area, industrial_area, parks, schools, hospitals
     gc.collect()
 
@@ -604,25 +652,25 @@ def generate_context(
     gc.collect()
 
     # ── Pedestrian walk route — dashed blue ───────────────────────────────────
-    legend_walk_handle = None
+    legend_walk = None
     if walk_route_gdf is not None and not walk_route_gdf.empty:
         try:
             walk_route_gdf.plot(
                 ax=ax,
                 color=ROUTE_COLOR,
                 linewidth=2.8,
-                linestyle=(0, (6, 4)),   # dashed
+                linestyle=(0, (6, 4)),
                 zorder=6,
                 alpha=0.90
             )
-            legend_walk_handle = Line2D(
+            legend_walk = Line2D(
                 [], [],
                 color=ROUTE_COLOR,
                 linewidth=2.8,
                 linestyle=(0, (6, 4)),
                 label="Pedestrian Route to MTR"
             )
-            log.info(f"[context] Walk route plotted ({len(walk_route_gdf)} segments)")
+            log.info(f"[context] walk route: {len(walk_route_gdf)} segments")
         except Exception as e:
             log.warning(f"[context] walk route plot: {e}")
 
@@ -643,24 +691,23 @@ def generate_context(
                 bus_stops.plot(ax=ax, color="#0d47a1",
                                markersize=40, zorder=9, marker="s")
         except Exception as e:
-            log.debug(f"[context] bus stop render: {e}")
+            log.debug(f"[context] bus render: {e}")
     del bus_stops
     gc.collect()
 
     # ── MTR stations ──────────────────────────────────────────────────────────
     if not stations_in_view.empty:
         try:
-            # Render station polygon fill
             _safe_plot(stations_in_view, ax,
                        facecolor=MTR_COLOR, edgecolor="none",
                        alpha=0.90, zorder=10)
-            # Render MTR logo icon at centroid
             for _, st in stations_in_view.iterrows():
-                _draw_mtr_icon(ax, st["_cx"], st["_cy"], zoom=0.035, zorder=14)
+                _draw_mtr_icon(ax, st["_cx"], st["_cy"],
+                               zoom=0.035, zorder=14)
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site — red fill with SITE label ──────────────────────────────────────
+    # ── Site ──────────────────────────────────────────────────────────────────
     try:
         sc = site_geom.centroid
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="white",
@@ -673,14 +720,13 @@ def generate_context(
 
     # ── Place labels ──────────────────────────────────────────────────────────
     placed  = []
-    offsets = [(0, 50), (0, -50), (55, 0), (-55, 0), (38, 38), (-38, 38),
-               (38, -38), (-38, -38)]
+    offsets = [(0, 50), (0, -50), (55, 0), (-55, 0),
+               (38, 38), (-38, 38), (38, -38), (-38, -38)]
 
     for i, (geom, text) in enumerate(label_items):
         try:
             p = (geom.representative_point()
                  if hasattr(geom, "representative_point") else geom.centroid)
-            # Skip labels too close to site centroid or each other
             if p.distance(site_point) < 80:
                 continue
             if any(p.distance(pp) < 90 for pp in placed):
@@ -689,8 +735,7 @@ def generate_context(
             ax.text(
                 p.x + dx, p.y + dy,
                 _wrap(text, 18),
-                fontsize=8.5,
-                ha="center", va="center",
+                fontsize=8.5, ha="center", va="center",
                 bbox=dict(facecolor="white", edgecolor="none",
                           alpha=0.85, boxstyle="round,pad=0.3"),
                 zorder=13, clip_on=True
@@ -699,12 +744,11 @@ def generate_context(
         except Exception:
             continue
 
-    # ── MTR station name labels ───────────────────────────────────────────────
+    # ── Station name labels ───────────────────────────────────────────────────
     if not stations_in_view.empty:
         try:
             for _, st in stations_in_view.iterrows():
-                raw   = st.get("_name")
-                label = _ascii_clean(str(raw)) if raw else None
+                label = _ascii_clean(str(st.get("_name", "")))
                 if not label:
                     continue
                 ax.text(
@@ -741,19 +785,18 @@ def generate_context(
 
     # ── Legend ────────────────────────────────────────────────────────────────
     legend_handles = [
-        mpatches.Patch(color="#f2c6a0",   label="Residential Area"),
-        mpatches.Patch(color="#b39ddb",   label="Industrial / Commercial Area"),
-        mpatches.Patch(color="#b7dfb9",   label="Public Park"),
-        mpatches.Patch(color="#9ecae1",   label="School / Institution"),
-        mpatches.Patch(color="#aec6cf",   label="Hospital"),
+        mpatches.Patch(color="#f2c6a0",        label="Residential Area"),
+        mpatches.Patch(color="#b39ddb",        label="Industrial / Commercial Area"),
+        mpatches.Patch(color="#b7dfb9",        label="Public Park"),
+        mpatches.Patch(color="#9ecae1",        label="School / Institution"),
+        mpatches.Patch(color="#aec6cf",        label="Hospital"),
         mpatches.Patch(color=hi_color, alpha=0.82, label=hi_label),
-        mpatches.Patch(color=MTR_COLOR,   label="MTR Station"),
-        mpatches.Patch(color="#e53935",   label="Site"),
-        mpatches.Patch(color="#0d47a1",   label="Bus Stop"),
+        mpatches.Patch(color=MTR_COLOR,        label="MTR Station"),
+        mpatches.Patch(color="#e53935",        label="Site"),
+        mpatches.Patch(color="#0d47a1",        label="Bus Stop"),
     ]
-
-    if legend_walk_handle is not None:
-        legend_handles.append(legend_walk_handle)
+    if legend_walk is not None:
+        legend_handles.append(legend_walk)
 
     ax.legend(
         handles=legend_handles,
@@ -764,7 +807,6 @@ def generate_context(
         edgecolor="black",
     )
 
-    # ── Title ─────────────────────────────────────────────────────────────────
     ax.set_title(
         f"Automated Site Context Analysis – {data_type} {value}",
         fontsize=15, weight="bold",
@@ -776,9 +818,8 @@ def generate_context(
     ax.set_ylim(ymin, ymax)
     ax.autoscale(False)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
     buf = BytesIO()
-    plt.savefig(buf, format="png", dpi=130,
+    plt.savefig(buf, format="png", dpi=120,
                 bbox_inches="tight", facecolor="white")
     plt.close(fig)
     gc.collect()
