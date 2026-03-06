@@ -149,17 +149,12 @@ def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
 
 # ============================================================
 # GEOMETRY EXTRACTION
-#
-# THE KEY FIX: OSMnx returns Relations as GeometryCollection.
-# We must extract LineString/MultiLineString components from it.
-# This function converts ANY geometry into a renderable line geometry.
 # ============================================================
 
 def _extract_lines(geom):
     """
     Recursively extract all line components from any Shapely geometry.
-    Returns a MultiLineString or LineString, or None if no lines found.
-    Handles: LineString, MultiLineString, GeometryCollection, and mixed types.
+    Handles GeometryCollection returned by OSMnx for Relations.
     """
     if geom is None or geom.is_empty:
         return None
@@ -190,9 +185,8 @@ def _extract_lines(geom):
 
 def _to_line_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Convert a GeoDataFrame with mixed geometry types (including GeometryCollection)
-    into one containing only line geometries.
-    Preserves all attribute columns (especially 'name').
+    Convert a GeoDataFrame with mixed geometry types into one containing
+    only line geometries. Preserves all attribute columns (especially 'name').
     """
     if gdf.empty:
         return gdf.copy()
@@ -201,7 +195,7 @@ def _to_line_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     for idx, row in gdf.iterrows():
         line_geom = _extract_lines(row.geometry)
         if line_geom is not None:
-            new_row        = row.copy()
+            new_row          = row.copy()
             new_row.geometry = line_geom
             rows.append(new_row)
 
@@ -227,7 +221,7 @@ def _safe_fetch(lat: float, lon: float, dist: int, tags: dict) -> gpd.GeoDataFra
 
 
 # ============================================================
-# FLATTEN — call immediately after every _safe_fetch()
+# FLATTEN
 # ============================================================
 
 def _flatten(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -266,7 +260,7 @@ def _clean_name(val) -> Optional[str]:
 
 
 # ============================================================
-# KEEP PLAIN LINES (for roads/light rail — not MTR)
+# KEEP PLAIN LINES (for roads/light rail)
 # ============================================================
 
 def _keep_lines(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
@@ -278,11 +272,8 @@ def _keep_lines(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
 
 # ============================================================
 # FETCH MTR ROUTES
-#
-# CRITICAL FIX: Do NOT filter by geometry type before _to_line_gdf.
-# OSMnx returns Relations as GeometryCollection — if we filter for
-# LineString/MultiLineString only, ALL relation rows are dropped.
-# Instead: flatten → _to_line_gdf (which extracts lines from any geom).
+# CRITICAL: Do NOT filter by geometry type before _to_line_gdf.
+# OSMnx returns Relations as GeometryCollection.
 # ============================================================
 
 def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
@@ -298,7 +289,7 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
                  f"geom_types={flat.geometry.geom_type.value_counts().to_dict()}, "
                  f"has_name={'name' in flat.columns}")
 
-        # Convert ALL geometry types to lines — this is the key fix
+        # Convert ALL geometry types to lines
         line_gdf = _to_line_gdf(flat)
 
         if not line_gdf.empty:
@@ -334,13 +325,17 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
 
 # ============================================================
 # MAIN GENERATOR
+#
+# SIGNATURE FIX: radius_m is optional and comes AFTER value,
+# matching how main.py calls it:
+#   generate_transport, dt, v, lon, lat, lot_ids, extents
 # ============================================================
 
 def generate_transport(data_type: str, value: str,
-                       radius_m: Optional[int] = None,
                        lon: float = None, lat: float = None,
                        lot_ids: List[str] = None,
-                       extents: List[dict] = None):
+                       extents: List[dict] = None,
+                       radius_m: Optional[int] = None):
 
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     fetch_r  = radius_m if radius_m else MAP_FETCH_RADIUS
@@ -376,7 +371,7 @@ def generate_transport(data_type: str, value: str,
                     "tertiary", "residential", "service", "unclassified"]
     })))
 
-    # Light rail — use _to_line_gdf same as MTR
+    # Light rail
     _lr        = _flatten(_safe_fetch(lat, lon, fetch_r, {"railway": "light_rail"}))
     light_rail = _to_line_gdf(_lr) if not _lr.empty \
                  else gpd.GeoDataFrame(geometry=[], crs=3857)
@@ -463,13 +458,13 @@ def generate_transport(data_type: str, value: str,
                 mtr_vis.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
                 lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
             else:
-                mtr_vis = mtr_vis.copy()
-                mtr_vis["_cname"] = mtr_vis[name_col].apply(_clean_name)
+                mtr_vis        = mtr_vis.copy()
+                mtr_vis["_cn"] = mtr_vis[name_col].apply(_clean_name)
 
-                named   = mtr_vis[mtr_vis["_cname"].notna()]
-                unnamed = mtr_vis[mtr_vis["_cname"].isna()]
+                named   = mtr_vis[mtr_vis["_cn"].notna()]
+                unnamed = mtr_vis[mtr_vis["_cn"].isna()]
 
-                for cname, grp in named.groupby("_cname", sort=False):
+                for cname, grp in named.groupby("_cn", sort=False):
                     lc = get_mtr_color(cname)
                     log.info(f"[transport] Plotting '{cname}' color={lc} n={len(grp)}")
 
@@ -494,7 +489,8 @@ def generate_transport(data_type: str, value: str,
                         lp = Point(mid.x, mid.y + off_y)
                         placed_lbl_pts.append(lp)
                         if xmin <= lp.x <= xmax and ymin <= lp.y <= ymax:
-                            ax.text(lp.x, lp.y, cname.upper(),
+                            display_lbl = _make_label(cname)
+                            ax.text(lp.x, lp.y, display_lbl,
                                     fontsize=9, weight="bold", color=lc,
                                     ha="center", va="center", zorder=12,
                                     bbox=dict(facecolor="white", edgecolor="none",
