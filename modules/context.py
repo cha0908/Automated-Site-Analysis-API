@@ -448,6 +448,47 @@ def generate_context(
     del support_blds, similar_blds
     gc.collect()
 
+    # ── 400m pedestrian catchment ring (zorder 5) ────────────────────────────
+    try:
+        catchment = gpd.GeoDataFrame(
+            geometry=[site_point.buffer(400)], crs=3857)
+        catchment.plot(ax=ax, facecolor="none", edgecolor="#555555",
+                       linewidth=1.2, linestyle="--", alpha=0.55, zorder=5)
+        # Label the ring
+        ax.text(site_point.x, site_point.y + 410, "400m walk",
+                fontsize=7.5, color="#555555", ha="center", va="bottom",
+                alpha=0.75, zorder=5)
+    except Exception as e:
+        log.debug(f"[context] catchment: {e}")
+
+    # ── Straight-line connector to nearest MTR (zorder 6) ────────────────────
+    if not stations_in_view.empty:
+        try:
+            nearest = stations_in_view.iloc[0]
+            nc      = nearest.geometry.centroid
+            ax.annotate("",
+                xy=(nc.x, nc.y), xytext=(site_point.x, site_point.y),
+                arrowprops=dict(
+                    arrowstyle="-",
+                    color="#005eff",
+                    lw=2.0,
+                    linestyle="dashed",
+                    connectionstyle="arc3,rad=0.0",
+                ),
+                zorder=6,
+            )
+            # Distance label on midpoint
+            mid_x = (site_point.x + nc.x) / 2
+            mid_y = (site_point.y + nc.y) / 2
+            dist_m = int(site_point.distance(nc))
+            ax.text(mid_x, mid_y, f"~{dist_m}m walk",
+                    fontsize=7.5, color="#005eff", ha="center", va="bottom",
+                    bbox=dict(facecolor="white", edgecolor="none",
+                              alpha=0.75, pad=1),
+                    zorder=6)
+        except Exception as e:
+            log.debug(f"[context] walk line: {e}")
+
     # ── Bus stops (zorder 9) ──────────────────────────────────────────────────
     if not bus_stops.empty:
         try:
@@ -558,6 +599,10 @@ def generate_context(
         mpatches.Patch(color=MTR_COLOR, label="MTR Station"),
         mpatches.Patch(color="#e53935", label="Site"),
         mpatches.Patch(color="#0d47a1", label="Bus Stop"),
+        mlines.Line2D([], [], color="#005eff", linewidth=2,
+                      linestyle="--", label="Route to MTR"),
+        mlines.Line2D([], [], color="#555555", linewidth=1.2,
+                      linestyle="--", label="400m Walk Catchment"),
     ]
     ax.legend(handles=handles, loc="lower left",
               bbox_to_anchor=(0.02, 0.02),
