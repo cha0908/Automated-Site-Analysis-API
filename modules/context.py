@@ -34,7 +34,7 @@ ox.settings.requests_timeout = 25
 log = logging.getLogger(__name__)
 
 FETCH_RADIUS  = 600
-MAP_HALF_SIZE = 600
+MAP_HALF_SIZE = 800
 MTR_COLOR     = "#ffd166"
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -381,27 +381,27 @@ def generate_context(
         # Require BOTH a name AND minimum 400m² — filters out individual row houses
         _has_name = _sim_raw["_nm"].apply(
             lambda x: bool(_ascii(str(x))) if pd.notna(x) else False)
-        _large    = _sim_raw.geometry.area >= 400
+        _large    = _sim_raw.geometry.area >= 800
         similar_blds = _sim_raw[_has_name & _large].copy()
-        log.info(f"[context] similar (named+large): {len(similar_blds)}")
+        log.info(f"[context] similar (named+800m²): {len(similar_blds)}")
     else:
         similar_blds = _EMPTY.copy()
 
     # Cluster bus stops to max 6
     bus_stops = bus_raw.copy()
-    if len(bus_stops) > 6:
+    if len(bus_stops) > 10:
         try:
             from sklearn.cluster import KMeans
             pts    = [g if g.geom_type == "Point" else g.centroid
                       for g in bus_stops.geometry]
             coords = np.array([[p.x, p.y] for p in pts])
             bus_stops["_cl"] = KMeans(
-                n_clusters=6, random_state=0).fit(coords).labels_
+                n_clusters=10, random_state=0).fit(coords).labels_
             bus_stops = gpd.GeoDataFrame(
                 bus_stops.groupby("_cl").first(), crs=3857)
         except Exception as e:
             log.debug(f"[context] kmeans: {e}")
-            bus_stops = bus_stops.head(6)
+            bus_stops = bus_stops.head(10)
     log.info(f"[context] bus stops: {len(bus_stops)}")
 
 
@@ -480,53 +480,9 @@ def generate_context(
     del support_blds, similar_blds
     gc.collect()
 
-    # ── zorder 5: 400m catchment ring ─────────────────────────────────────────
-    try:
-        gpd.GeoDataFrame(geometry=[site_point.buffer(400)], crs=3857).plot(
-            ax=ax, facecolor="none", edgecolor="#555555",
-            linewidth=1.2, linestyle="--", alpha=0.5, zorder=5)
-        ax.text(site_point.x, site_point.y + 412, "400m walk",
-                fontsize=7.5, color="#555555", ha="center", va="bottom",
-                alpha=0.7, zorder=5)
-    except Exception as e:
-        log.debug(f"[context] catchment: {e}")
+    # (catchment ring removed)
 
-    # ── zorder 6: Walk route ──────────────────────────────────────────────────
-    walk_drawn = False
-    if route_gdf is not None:
-        try:
-            route_gdf.plot(ax=ax, color="#005eff", linewidth=2.2,
-                           linestyle="--", alpha=0.9, zorder=6)
-            walk_drawn = True
-        except Exception as e:
-            log.debug(f"[context] route render: {e}")
-
-    if not walk_drawn and nearest_stn is not None:
-        # Straight-line fallback
-        try:
-            nc = nearest_stn["_centroid"]
-            ax.annotate("", xy=(nc.x, nc.y),
-                        xytext=(site_point.x, site_point.y),
-                        arrowprops=dict(arrowstyle="-", color="#005eff",
-                                        lw=2.0, linestyle="dashed"),
-                        zorder=6)
-        except Exception as e:
-            log.debug(f"[context] fallback line: {e}")
-
-    # Distance label
-    if nearest_stn is not None:
-        try:
-            nc     = nearest_stn["_centroid"]
-            dist_m = int(site_point.distance(nc))
-            mid_x  = (site_point.x + nc.x) / 2
-            mid_y  = (site_point.y + nc.y) / 2
-            ax.text(mid_x, mid_y, f"~{dist_m}m",
-                    fontsize=7.5, color="#005eff", ha="center", va="bottom",
-                    bbox=dict(facecolor="white", edgecolor="none",
-                              alpha=0.75, pad=1),
-                    zorder=7)
-        except Exception:
-            pass
+    # (route to MTR removed)
 
     # ── zorder 9: Bus stops ───────────────────────────────────────────────────
     if not bus_stops.empty:
@@ -635,10 +591,6 @@ def generate_context(
         mpatches.Patch(color=MTR_COLOR,   label="MTR Station"),
         mpatches.Patch(color="#e53935",   label="Site"),
         mpatches.Patch(color="#0d47a1",   label="Bus Stop"),
-        mlines.Line2D([], [], color="#005eff", linewidth=2, linestyle="--",
-                      label="Route to MTR"),
-        mlines.Line2D([], [], color="#555555", linewidth=1.2, linestyle="--",
-                      label="400m Walk Catchment"),
     ], loc="lower left", bbox_to_anchor=(0.02, 0.02),
        fontsize=8.5, framealpha=0.95)
 
