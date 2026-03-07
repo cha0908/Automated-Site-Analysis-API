@@ -146,17 +146,48 @@ def wrap_label(text, width=18):
     return "\n".join(textwrap.wrap(str(text), width))
 
 
+# Overpass endpoints — tried in order on failure
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+
+
+def _bbox_from_point(lat: float, lon: float, dist: float) -> tuple:
+    """Return (north, south, east, west) bbox in WGS84."""
+    return ox.utils_geo.bbox_from_point((lat, lon), dist=dist)
+
+
 def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
-    try:
-        gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
-        if gdf is not None and not gdf.empty:
-            return gdf.to_crs(3857)
-    except Exception as e:
-        log.debug(f"[context] fetch {list(tags.keys())[:3]}: {e}")
+    """
+    Fetch OSM features using bbox query (spatial index) instead of
+    features_from_point (unindexed Overpass 'around' filter).
+    bbox queries are 5-10x faster on dense urban areas like HK.
+    Tries multiple Overpass endpoints on failure.
+    """
+    bbox = _bbox_from_point(lat, lon, dist)
+    for ep in _OVERPASS_ENDPOINTS:
+        try:
+            ox.settings.overpass_endpoint = ep
+            gdf = ox.features_from_bbox(bbox, tags=tags)
+            if gdf is not None and not gdf.empty:
+                return gdf.to_crs(3857)
+            return _EMPTY.copy()
+        except Exception as e:
+            log.debug(f"[context] fetch {ep.split('/')[2]} "
+                      f"{list(tags.keys())[:2]}: {e}")
+            continue
     return _EMPTY.copy()
 
 
-def _parallel_fetch(tasks: dict, wall_timeout: float = 120) -> dict:
+def _parallel_fetch(tasks: dict, wall_timeout: float = 35) -> dict:
+    """
+    Fetch all OSM layers in parallel threads.
+    wall_timeout reduced to 35s (from 120s) — must complete before
+    Render's 30s health check kills the process.
+    Each individual fetch has a 25s timeout via ox.settings.requests_timeout.
+    """
     results = {k: _EMPTY.copy() for k in tasks}
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         futures = {pool.submit(_fetch_one, *args): key
