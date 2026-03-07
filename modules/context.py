@@ -41,9 +41,10 @@ from modules.resolver import resolve_location, get_lot_boundary
 log = logging.getLogger(__name__)
 
 # ── OSMnx settings (set once at module level — never mutated in threads) ──────
-ox.settings.use_cache        = True
-ox.settings.log_console      = False
-ox.settings.requests_timeout = 20
+ox.settings.use_cache           = True
+ox.settings.log_console         = False
+ox.settings.requests_timeout    = 22   # client socket timeout (seconds)
+ox.settings.overpass_settings   = "[out:json][timeout:20]"  # server-side query timeout
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FETCH_RADIUS  = 600
@@ -331,7 +332,7 @@ def generate_context(
         # Per-future timeout — any single fetch capped at 25s
         # prevents one slow query from blocking the entire pipeline
         import concurrent.futures as _cf
-        done, pending = _cf.wait(futs, timeout=25,
+        done, pending = _cf.wait(futs, timeout=28,  # 20s server timeout + 8s buffer
                                  return_when=_cf.ALL_COMPLETED)
         for f in pending:
             fname = futs[f]
@@ -464,7 +465,7 @@ def generate_context(
         })
     lbl_thread = threading.Thread(target=_fetch_labels, daemon=True)
     lbl_thread.start()
-    lbl_thread.join(timeout=20)
+    lbl_thread.join(timeout=25)  # 20s server + 5s transfer
     if lbl_thread.is_alive():
         log.warning("[context] labels fetch timed out — skipping")
     labels_gdf = _lbl_result[0]
