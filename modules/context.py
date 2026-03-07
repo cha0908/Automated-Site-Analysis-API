@@ -161,22 +161,24 @@ def _bbox_from_point(lat: float, lon: float, dist: float) -> tuple:
 
 def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
     """
-    Fetch OSM features using bbox query (spatial index) instead of
-    features_from_point (unindexed Overpass 'around' filter).
-    bbox queries are 5-10x faster on dense urban areas like HK.
-    Tries multiple Overpass endpoints on failure.
+    Fetch OSM features using bbox query (spatial index).
+    Each endpoint attempt is hard-limited to 20s via requests_timeout.
+    If all endpoints fail or timeout, returns empty GDF gracefully.
     """
     bbox = _bbox_from_point(lat, lon, dist)
     for ep in _OVERPASS_ENDPOINTS:
         try:
-            ox.settings.overpass_endpoint = ep
+            ox.settings.overpass_endpoint  = ep
+            ox.settings.requests_timeout   = 20   # hard per-request limit
             gdf = ox.features_from_bbox(bbox, tags=tags)
             if gdf is not None and not gdf.empty:
+                log.debug(f"[context] ✓ {ep.split('/')[2]} "
+                          f"{list(tags.keys())[:2]}")
                 return gdf.to_crs(3857)
             return _EMPTY.copy()
         except Exception as e:
-            log.debug(f"[context] fetch {ep.split('/')[2]} "
-                      f"{list(tags.keys())[:2]}: {e}")
+            log.debug(f"[context] ✗ {ep.split('/')[2]} "
+                      f"{list(tags.keys())[:2]}: {type(e).__name__}")
             continue
     return _EMPTY.copy()
 
@@ -312,7 +314,7 @@ def generate_context(
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
     # ── Parallel OSM fetch ────────────────────────────────────────────────────
-    log.info("[context] Fetching OSM data (120s)...")
+    log.info("[context] Fetching OSM data (35s wall, 20s per fetch)...")
 
     results = _parallel_fetch({
         "base": (lat, lon, max(fetch_r, 1200), {
