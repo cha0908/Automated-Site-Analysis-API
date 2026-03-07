@@ -19,7 +19,6 @@ Total file size estimate: ~80–120 MB for HK island + Kowloon.
 import os
 import sys
 import subprocess
-import urllib.request
 import geopandas as gpd
 import pandas as pd
 from shapely.geometry import shape, Point, Polygon, MultiPolygon
@@ -29,7 +28,6 @@ import json
 OUT_DIR = os.path.join(os.path.dirname(__file__), "data", "osm")
 os.makedirs(OUT_DIR, exist_ok=True)
 
-PBF_URL  = "https://download.geofabrik.de/asia/hong-kong-latest.osm.pbf"
 PBF_PATH = os.path.join(OUT_DIR, "hong-kong-latest.osm.pbf")
 
 # ── HK bounding box (WGS84) ───────────────────────────────────────────────────
@@ -41,16 +39,56 @@ HK_BBOX = (113.82, 22.14, 114.45, 22.58)   # (xmin, ymin, xmax, ymax)
 # STEP 1 — Download PBF
 # ============================================================
 
-def download_pbf():
-    if os.path.exists(PBF_PATH):
-        print(f"PBF already exists: {PBF_PATH}")
-        return
-    print(f"Downloading HK OSM extract (~70MB)...")
-    urllib.request.urlretrieve(PBF_URL, PBF_PATH,
-        reporthook=lambda b, bs, ts: print(
-            f"\r  {b*bs/1e6:.1f} / {ts/1e6:.1f} MB", end="", flush=True))
-    print(f"\nDownloaded: {PBF_PATH}")
+MIN_PBF_SIZE_MB = 30   # HK PBF is ~70MB — below 30MB = corrupt
 
+def download_pbf():
+    import requests as _req
+
+    # Delete existing file if corrupt from a previous failed download
+    if os.path.exists(PBF_PATH):
+        size_mb = os.path.getsize(PBF_PATH) / 1e6
+        if size_mb >= MIN_PBF_SIZE_MB:
+            print(f"PBF already exists ({size_mb:.1f} MB): {PBF_PATH}")
+            return
+        print(f"Existing PBF is corrupt ({size_mb:.1f} MB) — re-downloading...")
+        os.remove(PBF_PATH)
+
+    # Multiple sources — tries each until one succeeds
+    sources = [
+        "https://download.geofabrik.de/asia/hong-kong-latest.osm.pbf",
+        "https://download.openstreetmap.fr/extracts/asia/hong_kong-latest.osm.pbf",
+    ]
+
+    for url in sources:
+        print(f"Downloading from {url.split('/')[2]} ...")
+        try:
+            resp = _req.get(url, stream=True, timeout=300)
+            resp.raise_for_status()
+            total      = int(resp.headers.get("content-length", 0))
+            downloaded = 0
+            with open(PBF_PATH, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        mb  = downloaded / 1e6
+                        tot = f"{total/1e6:.1f}" if total else "?"
+                        print(f"\r  {mb:.1f} / {tot} MB", end="", flush=True)
+            print()
+            size_mb = os.path.getsize(PBF_PATH) / 1e6
+            if size_mb < MIN_PBF_SIZE_MB:
+                print(f"  Too small ({size_mb:.1f} MB) — trying next source...")
+                os.remove(PBF_PATH)
+                continue
+            print(f"Downloaded: {PBF_PATH} ({size_mb:.1f} MB)")
+            return
+        except Exception as e:
+            print(f"  Failed ({e}) — trying next source...")
+            if os.path.exists(PBF_PATH):
+                os.remove(PBF_PATH)
+            continue
+
+    raise RuntimeError("All download sources failed. Check Render network access.")
 
 # ============================================================
 # STEP 2 — OSM handlers using osmium
@@ -244,7 +282,7 @@ def parse_and_save(handler_cls, out_path, label):
 
 def main():
     download_pbf()
-    parse_and_save(BuildingHandler, os.path.join(OUT_DIR, "buildings.gpkg"),  "buildings")
+    parse_and_save(BuildingHandler, os.path.join(OUT_DIR, "buildings. gpkg"),  "buildings")
     parse_and_save(LanduseHandler,  os.path.join(OUT_DIR, "landuse.gpkg"),    "landuse")
     parse_and_save(AmenityHandler,  os.path.join(OUT_DIR, "amenities.gpkg"),  "amenities")
     parse_and_save(TransportHandler,os.path.join(OUT_DIR, "transport.gpkg"),  "transport")
