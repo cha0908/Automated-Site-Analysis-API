@@ -381,9 +381,9 @@ def generate_context(
         # Require BOTH a name AND minimum 400m² — filters out individual row houses
         _has_name = _sim_raw["_nm"].apply(
             lambda x: bool(_ascii(str(x))) if pd.notna(x) else False)
-        _large    = _sim_raw.geometry.area >= 800
+        _large    = _sim_raw.geometry.area >= 600
         similar_blds = _sim_raw[_has_name & _large].copy()
-        log.info(f"[context] similar (named+800m²): {len(similar_blds)}")
+        log.info(f"[context] similar (named+600m²): {len(similar_blds)}")
     else:
         similar_blds = _EMPTY.copy()
 
@@ -435,9 +435,6 @@ def generate_context(
     del base, results, labels_raw, support_raw
     gc.collect()
 
-    route_gdf = None  # walk graph removed — straight line fallback only
-    log.info("[context] Rendering...")
-
     # ═══════════════════════════════════════════════════════════════════════════
     # RENDER
     # ═══════════════════════════════════════════════════════════════════════════
@@ -448,14 +445,14 @@ def generate_context(
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    # Basemap
+    # Basemap — zoom=15 for 800m half-size (zoom=16 OOMs on larger area)
     try:
         cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
-                       zoom=16, alpha=0.95)
+                       zoom=15, alpha=0.95)
     except Exception:
         try:
             cx.add_basemap(ax, source=cx.providers.CartoDB.Positron,
-                           zoom=16, alpha=0.95)
+                           zoom=15, alpha=0.95)
         except Exception as e:
             log.warning(f"[context] basemap: {e}")
 
