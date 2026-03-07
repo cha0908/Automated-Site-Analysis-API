@@ -291,17 +291,18 @@ def generate_context(
     # support  = type-specific supporting amenities
     # stations = MTR stations
     # streets  = walkable highway edges for route drawing
-    log.info("[context] Fetching 5 tasks in parallel (120s limit)...")
+    log.info("[context] Fetching 4 tasks in parallel (120s limit)...")
     results = _parallel_fetch({
-        "base": (lat, lon, fetch_r, {
-            "landuse": True,
-            "leisure": ["park", "playground", "garden", "recreation_ground"],
-            "highway": ["bus_stop"],
-            "place":   ["neighbourhood", "suburb"],
+        # base: landuse + leisure + bus_stops + place labels + stations all merged
+        "base": (lat, lon, max(fetch_r, 1200), {
+            "landuse":  True,
+            "leisure":  ["park", "playground", "garden", "recreation_ground"],
+            "highway":  ["bus_stop"],
+            "place":    ["neighbourhood", "suburb"],
+            "railway":  ["station"],
         }),
         "similar":  (lat, lon, fetch_r, sim_tags),
         "support":  (lat, lon, fetch_r, sup_tags),
-        "stations": (lat, lon, 1200,    {"railway": "station"}),
         "streets":  (lat, lon, fetch_r, {
             "highway": ["primary", "secondary", "tertiary",
                         "residential", "footway", "pedestrian",
@@ -349,10 +350,11 @@ def generate_context(
     else:
         similar_blds = _EMPTY.copy()
 
-    # ── Process stations ──────────────────────────────────────────────────────
+    # ── Process stations (extracted from base) ────────────────────────────────
     stations_in_view = _EMPTY.copy()
     nearest_stn_name = None
-    stations_raw     = results["stations"]
+    stations_raw     = _filter_col(base, "railway", "station") \
+                       if not base.empty else _EMPTY.copy()
 
     if not stations_raw.empty:
         s             = stations_raw.copy()
@@ -366,47 +368,30 @@ def generate_context(
             nearest_stn_name = _ascii_only(str(raw_name)) if raw_name else None
 
     # ── Walk route along streets to nearest MTR ───────────────────────────────
-    walk_route_line = None
+    walk_route_gdf  = _EMPTY.copy()
     streets_gdf     = results.get("streets", _EMPTY.copy())
 
     if not stations_in_view.empty and not streets_gdf.empty:
         try:
-            from shapely.geometry import LineString, MultiLineString
-            from shapely.ops import nearest_points, unary_union, linemerge
+            from shapely.geometry import LineString
 
-            nearest_stn     = stations_in_view.iloc[0]
-            nearest_stn_pt  = nearest_stn.geometry.centroid
+            nearest_stn_pt = stations_in_view.iloc[0].geometry.centroid
 
-            # Keep only LineString edges
+            # Keep only line edges
             edges = streets_gdf[streets_gdf.geometry.geom_type.isin(
                 ["LineString", "MultiLineString"])].copy()
 
             if not edges.empty:
-                # Build a corridor between site and station (buffer of straight line)
+                # 200m corridor between site and station
                 corridor = LineString([
                     (site_point.x, site_point.y),
                     (nearest_stn_pt.x, nearest_stn_pt.y)
-                ]).buffer(200)  # 200m corridor either side
-
-                # Clip edges to corridor
-                corridor_edges = edges[edges.geometry.intersects(corridor)]
-
-                if not corridor_edges.empty:
-                    # Merge into continuous lines and pick the longest
-                    merged = linemerge(
-                        unary_union(corridor_edges.geometry.values))
-                    if merged.geom_type == "LineString":
-                        walk_route_line = merged
-                    elif merged.geom_type == "MultiLineString":
-                        # Pick the line that connects closest to both endpoints
-                        best = max(merged.geoms, key=lambda g: g.length)
-                        walk_route_line = best
-
-            log.info(f"[context] walk route: "
-                     f"{'line len=' + str(int(walk_route_line.length)) + 'm' if walk_route_line else 'unavailable'}")
+                ]).buffer(180)
+                # Just clip and plot — no expensive merge
+                walk_route_gdf = edges[edges.geometry.intersects(corridor)]
+                log.info(f"[context] walk route edges: {len(walk_route_gdf)}")
         except Exception as e:
-            log.warning(f"[context] walk route error: {e}")
-            walk_route_line = None
+            log.warning(f"[context] walk route: {e}")
 
     del streets_gdf
     gc.collect()
@@ -519,12 +504,10 @@ def generate_context(
             nearest_stn_pt = stations_in_view.iloc[0].geometry.centroid
             dist_m         = int(site_point.distance(nearest_stn_pt))
 
-            if walk_route_line is not None:
-                # Draw the real street-following route
-                route_gdf = gpd.GeoDataFrame(
-                    geometry=[walk_route_line], crs=3857)
-                route_gdf.plot(ax=ax, color="#005eff", linewidth=2.5,
-                               linestyle="--", alpha=0.85, zorder=6)
+            if not walk_route_gdf.empty:
+                # Draw clipped street edges as walk route
+                walk_route_gdf.plot(ax=ax, color="#005eff", linewidth=2.2,
+                                    linestyle="--", alpha=0.85, zorder=6)
             else:
                 # Fallback: straight dashed line
                 ax.annotate("",
@@ -534,7 +517,7 @@ def generate_context(
                                    lw=2.0, linestyle="dashed"),
                     zorder=6)
 
-            # Distance label at midpoint
+            # Distance label
             mid_x = (site_point.x + nearest_stn_pt.x) / 2
             mid_y = (site_point.y + nearest_stn_pt.y) / 2
             ax.text(mid_x, mid_y, f"~{dist_m}m",
@@ -544,6 +527,8 @@ def generate_context(
                     zorder=7)
         except Exception as e:
             log.debug(f"[context] walk line render: {e}")
+    del walk_route_gdf
+    gc.collect()
 
     # ── Bus stops (zorder 9) ──────────────────────────────────────────────────
     if not bus_stops.empty:
