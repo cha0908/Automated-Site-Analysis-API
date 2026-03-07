@@ -314,10 +314,15 @@ def generate_context(
     sp_label  = _SP_LABEL.get(SITE_TYPE, "Amenities")
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
-    # ── Parallel OSM fetch (4 tasks) ──────────────────────────────────────────
-    log.info("[context] Fetching OSM data (4 tasks, 120s)...")
+    # ── Parallel OSM fetch + walk graph (5 tasks concurrently) ──────────────
+    log.info("[context] Fetching OSM data + walk graph in parallel (120s)...")
+    import concurrent.futures as cf
+
+    # Start walk graph immediately in background
+    _walk_executor = cf.ThreadPoolExecutor(max_workers=1)
+    _walk_future   = None  # will be set once we know the station location
+
     results = _parallel_fetch({
-        # base: landuse + leisure + bus_stops + stations + place labels
         "base": (lat, lon, max(fetch_r, 1200), {
             "landuse":  True,
             "leisure":  ["park", "playground", "garden", "recreation_ground"],
@@ -412,19 +417,20 @@ def generate_context(
             bus_stops = bus_stops.head(6)
     log.info(f"[context] bus stops: {len(bus_stops)}")
 
-    # ── Walk route (real shortest path, 20s timeout) ──────────────────────────
-    route_gdf = None
+    # ── Launch walk graph now that we know the station ────────────────────────
+    # This runs concurrently with label processing / data prep
+    _walk_future = None
     if nearest_stn is not None:
         try:
-            # Get station lon/lat in WGS84
             stn_pt_4326 = gpd.GeoSeries(
                 [nearest_stn["_centroid"]], crs=3857).to_crs(4326).iloc[0]
-            route_gdf = _walk_route(lat, lon,
-                                    stn_pt_4326.x, stn_pt_4326.y,
-                                    timeout=20)
+            _stn_lon = stn_pt_4326.x
+            _stn_lat = stn_pt_4326.y
+            _walk_future = _walk_executor.submit(
+                _walk_route, lat, lon, _stn_lon, _stn_lat, 25)
+            log.info("[context] walk graph launched in background")
         except Exception as e:
-            log.warning(f"[context] walk route: {e}")
-    log.info(f"[context] walk={'yes' if route_gdf is not None else 'no'}")
+            log.warning(f"[context] walk graph launch: {e}")
 
     # ── Place labels ──────────────────────────────────────────────────────────
     labels_raw      = results["labels"]
@@ -455,6 +461,19 @@ def generate_context(
 
     del base, results, labels_raw, support_raw
     gc.collect()
+
+    # ── Collect walk route result (was computing in background) ──────────────
+    route_gdf = None
+    if _walk_future is not None:
+        try:
+            route_gdf = _walk_future.result(timeout=5)  # at most 5s extra wait
+        except Exception as e:
+            log.warning(f"[context] walk collect: {e}")
+    try:
+        _walk_executor.shutdown(wait=False)
+    except Exception:
+        pass
+    log.info(f"[context] walk={'yes' if route_gdf is not None else 'no (fallback)'}")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # RENDER
