@@ -2,12 +2,20 @@
 context.py — Site-Type Driven Context Analysis
 ALKF+ Module
 
-Performance contract (Render):
-  - Overpass fetch: tries 3 endpoints with fallback on timeout/error
-  - OSM result cache: results cached per (lat, lon, tags_hash) in memory
-  - Walk graph: cached per ~1km grid cell, built once per process
-  - Total wall time target: < 120s (typical: 30-60s with warm cache)
-  - Map always renders — every data layer has a safe empty fallback
+Timeout strategy:
+  The Overpass API throttles by queuing requests slowly rather than
+  rejecting them. requests_timeout does NOT help — the server accepts
+  the connection and then stalls. The only reliable fix is to run each
+  OSM fetch in a daemon thread and kill it after a hard wall time.
+
+  Per-fetch hard timeout:  _PER_FETCH_TIMEOUT  (15s default)
+  Total parallel wall:     _FETCH_WALL_TIMEOUT (20s default)
+
+  Any fetch that doesn't return within its thread timeout returns an
+  empty GeoDataFrame. The map always renders with whatever data arrived.
+
+  Result cache: fetched GDFs cached per (lat2dp, lon2dp, dist, tags_hash)
+  so repeat requests for the same location are instant.
 """
 
 import logging
@@ -26,7 +34,7 @@ import numpy as np
 import textwrap
 import pandas as pd
 
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List
 from shapely.geometry import Point
 from io import BytesIO
@@ -38,27 +46,26 @@ from modules.resolver import resolve_location, get_lot_boundary
 
 log = logging.getLogger(__name__)
 
-ox.settings.use_cache   = True
-ox.settings.log_console = False
+ox.settings.use_cache        = True
+ox.settings.log_console      = False
+# Low per-HTTP-request timeout — if Overpass stalls on a single request
+# this fires. But Overpass often accepts connection then queues for minutes,
+# so we ALSO use daemon thread timeouts as a second layer.
+ox.settings.requests_timeout = 50   # must be < _PER_FETCH_TIMEOUT thread limit
 
 
-# ── Overpass endpoint fallback chain ─────────────────────────────────────────
-# If the primary endpoint throttles or times out, OSMnx automatically
-# retries the next one. We set all three so ox rotates through them.
+# ── Timing budgets ────────────────────────────────────────────────────────────
+_PER_FETCH_TIMEOUT  = 55   # seconds per individual OSM fetch thread
+_FETCH_WALL_TIMEOUT = 60   # seconds total wall for all parallel fetches
+_WALK_GRAPH_TIMEOUT = 20   # seconds for walk graph build
+_WALK_ROUTE_TIMEOUT = 8    # seconds for shortest path
+
+# ── Overpass endpoints ────────────────────────────────────────────────────────
 _OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
-ox.settings.overpass_endpoint = _OVERPASS_ENDPOINTS[0]
-ox.settings.requests_timeout  = 55   # per HTTP call — enough for throttled IP
-
-
-# ── Timing budgets ────────────────────────────────────────────────────────────
-_FETCH_WALL_TIMEOUT  = 60    # parallel fetch wall limit (seconds)
-_WALK_GRAPH_TIMEOUT  = 25    # walk graph build hard limit
-_WALK_ROUTE_TIMEOUT  = 10    # shortest path computation limit
-_WALK_GRAPH_DIST     = 1000  # metres radius for walk graph
 
 # ── Map parameters ────────────────────────────────────────────────────────────
 FETCH_RADIUS  = 700
@@ -83,30 +90,11 @@ except:
 
 _EMPTY = gpd.GeoDataFrame(geometry=[], crs=3857)
 
-
-# ============================================================
-# MODULE-LEVEL CACHES
-# Prevent re-hitting Overpass for identical requests within
-# the same server process lifetime.
-# ============================================================
-
-# OSM feature result cache: key = (lat2dp, lon2dp, tags_hash)
-_FEATURE_CACHE: dict = {}
-_FEATURE_CACHE_LOCK  = threading.Lock()
-
-# Walk graph cache: key = (lat2dp, lon2dp)
+# ── Caches ────────────────────────────────────────────────────────────────────
+_FEATURE_CACHE: dict  = {}
+_FEATURE_CACHE_LOCK   = threading.Lock()
 _WALK_GRAPH_CACHE: dict = {}
 _WALK_GRAPH_LOCK        = threading.Lock()
-
-
-def _tags_hash(tags: dict) -> str:
-    return hashlib.md5(
-        json.dumps(tags, sort_keys=True).encode()
-    ).hexdigest()[:12]
-
-
-def _feature_cache_key(lat, lon, dist, tags):
-    return (round(lat, 2), round(lon, 2), dist, _tags_hash(tags))
 
 
 # ============================================================
@@ -125,7 +113,7 @@ def infer_site_type(zone: str) -> str:
 
 
 # ============================================================
-# SITE-TYPE DRIVEN FETCH CONFIGURATION
+# SITE-TYPE CONFIGS
 # ============================================================
 
 SITE_CONFIGS = {
@@ -150,7 +138,6 @@ SITE_CONFIGS = {
         "support_tags": {
             "tourism": ["attraction", "museum"],
             "amenity": ["restaurant", "cafe", "bar"],
-            "shop":    ["mall"],
         },
         "highlight_color": "#b15928",
         "highlight_label": "Hotels & Serviced Apartments",
@@ -186,21 +173,33 @@ SITE_CONFIGS = {
             "landuse":  ["industrial", "port"],
         },
         "support_tags": {
-            "highway": ["motorway", "trunk", "primary"],
+            "highway": ["motorway", "trunk"],
             "landuse": ["port"],
         },
         "highlight_color": "#33a02c",
         "highlight_label": "Industrial / Warehouse Buildings",
     },
     "OTHER":  {
-        "primary_tags": {"building": True},
-        "support_tags":  {"amenity": True},
+        "primary_tags": {
+            "building": ["yes", "commercial", "residential", "office",
+                         "retail", "apartments", "hotel", "industrial"],
+        },
+        "support_tags": {
+            "amenity": ["school", "hospital", "restaurant",
+                        "cafe", "bank", "library"],
+        },
         "highlight_color": "#aaaaaa",
         "highlight_label": "Nearby Buildings",
     },
     "MIXED":  {
-        "primary_tags": {"building": True},
-        "support_tags":  {"amenity": True, "leisure": True},
+        "primary_tags": {
+            "building": ["yes", "commercial", "residential", "office",
+                         "retail", "apartments", "hotel", "industrial"],
+        },
+        "support_tags": {
+            "amenity": ["school", "hospital", "restaurant", "cafe"],
+            "leisure": ["park", "playground", "garden"],
+        },
         "highlight_color": "#aaaaaa",
         "highlight_label": "Nearby Buildings",
     },
@@ -215,67 +214,10 @@ def _wrap(text, width=18):
     return "\n".join(textwrap.wrap(str(text), width))
 
 
-def _fetch_one_with_fallback(lat, lon, dist, tags) -> gpd.GeoDataFrame:
-    """
-    Fetch OSM features, trying each Overpass endpoint in turn.
-    Checks module-level cache first — returns cached result instantly
-    if the same (location, dist, tags) was fetched earlier this session.
-    """
-    ck = _feature_cache_key(lat, lon, dist, tags)
-    with _FEATURE_CACHE_LOCK:
-        if ck in _FEATURE_CACHE:
-            log.info(f"[context] cache hit {_tags_hash(tags)}")
-            return _FEATURE_CACHE[ck]
-
-    result = _EMPTY.copy()
-
-    for endpoint in _OVERPASS_ENDPOINTS:
-        try:
-            ox.settings.overpass_endpoint = endpoint
-            gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
-            if gdf is not None and not gdf.empty:
-                result = gdf.to_crs(3857)
-                log.info(f"[context] fetched {len(result)} rows "
-                         f"via {endpoint.split('/')[2]}")
-            break   # success — stop trying endpoints
-        except Exception as e:
-            log.warning(f"[context] endpoint {endpoint.split('/')[2]} "
-                        f"failed: {type(e).__name__}: {e}")
-            continue
-
-    with _FEATURE_CACHE_LOCK:
-        _FEATURE_CACHE[ck] = result
-
-    return result
-
-
-def _parallel_fetch(tasks: dict) -> dict:
-    """
-    Run OSM fetches in parallel with a hard wall timeout.
-    Tasks that exceed _FETCH_WALL_TIMEOUT return empty GDF.
-    """
-    results = {k: _EMPTY.copy() for k in tasks}
-    n = min(len(tasks), 5)
-
-    with ThreadPoolExecutor(max_workers=n) as pool:
-        futures = {
-            pool.submit(_fetch_one_with_fallback, *args): key
-            for key, args in tasks.items()
-        }
-        done, not_done = wait(
-            futures, timeout=_FETCH_WALL_TIMEOUT, return_when=ALL_COMPLETED
-        )
-        for f in not_done:
-            f.cancel()
-            log.warning(f"[context] fetch wall timeout: {futures[f]}")
-        for f in done:
-            key = futures[f]
-            try:
-                results[key] = f.result()
-                log.info(f"[context] ✓ {key}: {len(results[key])} rows")
-            except Exception as e:
-                log.warning(f"[context] ✗ {key}: {e}")
-    return results
+def _tags_hash(tags):
+    return hashlib.md5(
+        json.dumps(tags, sort_keys=True).encode()
+    ).hexdigest()[:10]
 
 
 def _col(gdf, col):
@@ -317,10 +259,6 @@ def _ascii_clean(text) -> Optional[str]:
 
 
 def _flatten_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    """
-    Flatten OSMnx MultiIndex (element_type, osmid) to plain int index.
-    Must be called on each GeoDataFrame individually before concat.
-    """
     if gdf.empty:
         return gdf.copy()
     gdf = gdf.copy()
@@ -355,17 +293,113 @@ def _draw_mtr_icon(ax, x, y, zoom=0.035, zorder=14):
 
 
 # ============================================================
-# WALK GRAPH — cached + timeout-guarded
+# CORE FETCH — daemon thread with hard wall timeout
+#
+# Why daemon threads instead of requests_timeout:
+#   Overpass accepts the TCP connection immediately (so requests_timeout
+#   doesn't fire) then stalls the HTTP response for 1-4 minutes while
+#   it processes the query queue. The only way to enforce a real deadline
+#   is to run the blocking ox.features_from_point call in a daemon thread
+#   and abandon it after _PER_FETCH_TIMEOUT seconds.
+#
+# The thread continues running in the background after we abandon it —
+# daemon=True ensures it doesn't prevent process shutdown. When it
+# eventually completes, the result is written to _FEATURE_CACHE so
+# the NEXT request for the same location benefits from it.
+# ============================================================
+
+def _fetch_with_hard_timeout(lat, lon, dist, tags,
+                              name="?") -> gpd.GeoDataFrame:
+    """
+    Fetch OSM features with a hard per-thread timeout.
+    Returns cached result instantly if available.
+    If fetch completes after timeout, result is cached for next call.
+    """
+    ck = (round(lat, 2), round(lon, 2), dist, _tags_hash(tags))
+
+    # Cache hit — instant return
+    with _FEATURE_CACHE_LOCK:
+        if ck in _FEATURE_CACHE:
+            log.info(f"[context] cache hit: {name}")
+            return _FEATURE_CACHE[ck]
+
+    result    = [_EMPTY.copy()]
+    completed = [False]
+
+    def _do_fetch():
+        for endpoint in _OVERPASS_ENDPOINTS:
+            try:
+                ox.settings.overpass_endpoint = endpoint
+                gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
+                if gdf is not None and not gdf.empty:
+                    result[0] = gdf.to_crs(3857)
+                    log.info(f"[context] ✓ {name}: {len(result[0])} rows "
+                             f"[{endpoint.split('/')[2]}]")
+                else:
+                    log.info(f"[context] ✓ {name}: 0 rows (empty)")
+                completed[0] = True
+                # Write to cache even if thread was already abandoned
+                with _FEATURE_CACHE_LOCK:
+                    _FEATURE_CACHE[ck] = result[0]
+                return   # success — stop trying endpoints
+            except Exception as e:
+                log.warning(f"[context] {name} @ "
+                            f"{endpoint.split('/')[2]}: {type(e).__name__}")
+                continue
+        completed[0] = True
+        with _FEATURE_CACHE_LOCK:
+            _FEATURE_CACHE[ck] = result[0]
+
+    t = threading.Thread(target=_do_fetch, daemon=True, name=f"osm-{name}")
+    t.start()
+    t.join(timeout=_PER_FETCH_TIMEOUT)
+
+    if not completed[0]:
+        log.warning(f"[context] timeout ({_PER_FETCH_TIMEOUT}s): {name} "
+                    f"— thread continues in background, result cached on completion")
+
+    return result[0]
+
+
+def _parallel_fetch(tasks: dict) -> dict:
+    """
+    Submit all fetches simultaneously, collect results up to
+    _FETCH_WALL_TIMEOUT. Each individual fetch also has its own
+    _PER_FETCH_TIMEOUT via daemon thread.
+    """
+    results = {k: _EMPTY.copy() for k in tasks}
+
+    with ThreadPoolExecutor(max_workers=min(len(tasks), 5)) as pool:
+        future_map = {
+            pool.submit(
+                _fetch_with_hard_timeout,
+                *args,
+                name=key
+            ): key
+            for key, args in tasks.items()
+        }
+
+        # Collect as they complete — stop after wall timeout
+        import time
+        deadline = time.monotonic() + _FETCH_WALL_TIMEOUT
+
+        for future in as_completed(future_map,
+                                   timeout=max(0, deadline - time.monotonic())):
+            key = future_map[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                log.warning(f"[context] future {key}: {e}")
+
+    return results
+
+
+# ============================================================
+# WALK GRAPH — cached + timeout-guarded daemon thread
 # ============================================================
 
 def _get_walk_graph(lat: float, lon: float):
-    """
-    Return cached OSMnx walk graph or build one.
-    Cache key = (round(lat,2), round(lon,2)) — ~1km grid cell.
-    Hard timeout: _WALK_GRAPH_TIMEOUT seconds.
-    """
     ck = (round(lat, 2), round(lon, 2))
-
     with _WALK_GRAPH_LOCK:
         if ck in _WALK_GRAPH_CACHE:
             log.info("[context] walk graph cache hit")
@@ -377,10 +411,9 @@ def _get_walk_graph(lat: float, lon: float):
     def _build():
         try:
             G = ox.graph_from_point(
-                (lat, lon),
-                dist=_WALK_GRAPH_DIST,
-                network_type="walk",
-                simplify=True
+                (lat, lon), dist=_WALK_GRAPH_DIST if hasattr(
+                    _WALK_GRAPH_DIST, '__int__') else 1000,
+                network_type="walk", simplify=True
             )
             result[0] = G
         except Exception as e:
@@ -391,9 +424,8 @@ def _get_walk_graph(lat: float, lon: float):
     t.join(timeout=_WALK_GRAPH_TIMEOUT)
 
     if t.is_alive():
-        log.warning(f"[context] walk graph timed out after {_WALK_GRAPH_TIMEOUT}s")
+        log.warning(f"[context] walk graph timed out ({_WALK_GRAPH_TIMEOUT}s)")
         return None
-
     if error[0]:
         log.warning(f"[context] walk graph error: {error[0]}")
         return None
@@ -405,16 +437,15 @@ def _get_walk_graph(lat: float, lon: float):
     with _WALK_GRAPH_LOCK:
         _WALK_GRAPH_CACHE[ck] = G
 
-    log.info(f"[context] walk graph built: "
-             f"{G.number_of_nodes()} nodes / {G.number_of_edges()} edges")
+    log.info(f"[context] walk graph: {G.number_of_nodes()}n / "
+             f"{G.number_of_edges()}e")
     return G
 
 
+_WALK_GRAPH_DIST = 1000   # metres
+
+
 def _compute_walk_route(lat, lon, station_wgs84: Point):
-    """
-    Compute pedestrian path site → MTR station.
-    Returns EPSG:3857 GeoDataFrame or None.
-    """
     G = _get_walk_graph(lat, lon)
     if G is None:
         return None
@@ -422,8 +453,7 @@ def _compute_walk_route(lat, lon, station_wgs84: Point):
     try:
         site_node = ox.distance.nearest_nodes(G, lon, lat)
         stn_node  = ox.distance.nearest_nodes(
-            G, station_wgs84.x, station_wgs84.y
-        )
+            G, station_wgs84.x, station_wgs84.y)
         if site_node == stn_node:
             return None
     except Exception as e:
@@ -495,7 +525,7 @@ def generate_context(
         ).to_crs(3857).iloc[0]
         site_geom = site_point.buffer(80)
         site_gdf  = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-        log.info("[context] using 80m buffer fallback")
+        log.info("[context] using 80m buffer")
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -510,16 +540,11 @@ def generate_context(
     hi_label  = cfg["highlight_label"]
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
-    # ── Parallel OSM fetch ────────────────────────────────────────────────────
-    # Each task uses _fetch_one_with_fallback which:
-    #   1. Returns from module cache if previously fetched
-    #   2. Tries primary Overpass endpoint
-    #   3. Falls back to kumi.systems if primary fails/times out
-    #   4. Falls back to mail.ru endpoint as last resort
-    # ─────────────────────────────────────────────────────────────────────────
-    log.info("[context] Fetching OSM data...")
+    # ── Parallel fetch (all with individual hard timeouts) ────────────────────
+    log.info(f"[context] Fetching OSM data "
+             f"(per-fetch: {_PER_FETCH_TIMEOUT}s, wall: {_FETCH_WALL_TIMEOUT}s)...")
 
-    fetch_tasks = {
+    results = _parallel_fetch({
         "landuse":  (lat, lon, fetch_r, {
             "landuse": True,
             "leisure": ["park", "playground", "garden", "recreation_ground"],
@@ -528,9 +553,7 @@ def generate_context(
         "support":  (lat, lon, fetch_r, cfg["support_tags"]),
         "bus":      (lat, lon, fetch_r, {"highway": "bus_stop"}),
         "stations": (lat, lon, 1500,    {"railway": "station"}),
-    }
-
-    results = _parallel_fetch(fetch_tasks)
+    })
     gc.collect()
 
     # ── Derive layers ─────────────────────────────────────────────────────────
@@ -541,24 +564,22 @@ def generate_context(
     parks            = _filter_col(landuse_raw, "leisure",
                                    ["park", "garden",
                                     "recreation_ground", "playground"])
-
     support_raw = results["support"]
     schools     = _filter_col(support_raw, "amenity",
                               ["school", "college", "university", "kindergarten"])
-    hospitals   = _filter_col(support_raw, "amenity", ["hospital", "clinic"])
+    hospitals   = _filter_col(support_raw, "amenity",
+                              ["hospital", "clinic"])
 
     primary_raw = _flatten_index(results["primary"])
     primary_bld = _polys_only(primary_raw)
     if not primary_bld.empty:
         primary_bld["_name"] = _get_name(primary_bld)
         named_mask  = primary_bld["_name"].apply(
-            lambda x: bool(_ascii_clean(str(x))) if pd.notna(x) else False
-        )
+            lambda x: bool(_ascii_clean(str(x))) if pd.notna(x) else False)
         large_mask  = primary_bld.geometry.area >= 300
         primary_bld = primary_bld[named_mask | large_mask].copy()
     log.info(f"[context] primary buildings: {len(primary_bld)}")
 
-    # Bus stops
     bus_raw   = _flatten_index(results["bus"])
     bus_stops = bus_raw[
         bus_raw.geometry.geom_type == "Point"
@@ -576,7 +597,6 @@ def generate_context(
         except Exception:
             bus_stops = bus_stops.head(6)
 
-    # MTR stations
     stations_raw     = _flatten_index(results["stations"])
     stations_in_view = _EMPTY.copy()
     nearest_station  = None
@@ -588,8 +608,7 @@ def generate_context(
         s["_cx"]   = s.geometry.centroid.x
         s["_cy"]   = s.geometry.centroid.y
         s["_dist"] = s.apply(
-            lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1
-        )
+            lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1)
         s = s.dropna(subset=["_name"]).sort_values("_dist")
         stations_in_view = s[s["_dist"] <= half_size * 1.5].copy()
 
@@ -605,8 +624,8 @@ def generate_context(
     if show_walk_route and nearest_station is not None:
         log.info(f"[context] Walk route → {nearest_stn_name}...")
         walk_route_gdf = _compute_walk_route(lat, lon, nearest_station)
-        status = f"{len(walk_route_gdf)} segs" if walk_route_gdf is not None else "unavailable"
-        log.info(f"[context] walk route: {status}")
+        log.info(f"[context] walk route: "
+                 f"{'yes' if walk_route_gdf is not None else 'unavailable'}")
 
     # Labels
     label_items = []
@@ -646,7 +665,7 @@ def generate_context(
              f"walk={'yes' if walk_route_gdf is not None else 'no'}")
 
     # ============================================================
-    # FIGURE — extent locked BEFORE basemap
+    # FIGURE
     # ============================================================
 
     fig, ax = plt.subplots(figsize=(16, 12))
@@ -675,7 +694,6 @@ def generate_context(
     ax.set_ylim(ymin, ymax)
     ax.autoscale(False)
 
-    # ── Layers ───────────────────────────────────────────────────────────────
     _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
@@ -688,7 +706,6 @@ def generate_context(
     del primary_bld
     gc.collect()
 
-    # Walk route
     legend_walk = None
     if walk_route_gdf is not None and not walk_route_gdf.empty:
         try:
@@ -701,7 +718,6 @@ def generate_context(
         except Exception as e:
             log.warning(f"[context] walk route plot: {e}")
 
-    # Bus stops
     if not bus_stops.empty:
         try:
             if _bus_icon is not None:
@@ -722,7 +738,6 @@ def generate_context(
     del bus_stops
     gc.collect()
 
-    # MTR stations
     if not stations_in_view.empty:
         try:
             _safe_plot(stations_in_view, ax,
@@ -733,7 +748,6 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # Site
     try:
         sc = site_geom.centroid
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="white",
@@ -743,7 +757,6 @@ def generate_context(
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
-    # Place labels
     placed  = []
     offsets = [(0, 50), (0, -50), (55, 0), (-55, 0),
                (38, 38), (-38, 38), (38, -38), (-38, -38)]
@@ -766,7 +779,6 @@ def generate_context(
         except Exception:
             continue
 
-    # Station labels
     if not stations_in_view.empty:
         try:
             for _, st in stations_in_view.iterrows():
@@ -782,7 +794,6 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station labels: {e}")
 
-    # Info box
     info_lines = [
         f"{data_type}: {value}",
         f"OZP Plan: {primary['PLAN_NO']}",
@@ -798,17 +809,16 @@ def generate_context(
                       linewidth=1.5, pad=6),
             zorder=20)
 
-    # Legend
     legend_handles = [
-        mpatches.Patch(color="#f2c6a0",           label="Residential Area"),
-        mpatches.Patch(color="#b39ddb",           label="Industrial / Commercial Area"),
-        mpatches.Patch(color="#b7dfb9",           label="Public Park"),
-        mpatches.Patch(color="#9ecae1",           label="School / Institution"),
-        mpatches.Patch(color="#aec6cf",           label="Hospital"),
+        mpatches.Patch(color="#f2c6a0",            label="Residential Area"),
+        mpatches.Patch(color="#b39ddb",            label="Industrial / Commercial Area"),
+        mpatches.Patch(color="#b7dfb9",            label="Public Park"),
+        mpatches.Patch(color="#9ecae1",            label="School / Institution"),
+        mpatches.Patch(color="#aec6cf",            label="Hospital"),
         mpatches.Patch(color=hi_color, alpha=0.82, label=hi_label),
-        mpatches.Patch(color=MTR_COLOR,           label="MTR Station"),
-        mpatches.Patch(color="#e53935",           label="Site"),
-        mpatches.Patch(color="#0d47a1",           label="Bus Stop"),
+        mpatches.Patch(color=MTR_COLOR,            label="MTR Station"),
+        mpatches.Patch(color="#e53935",            label="Site"),
+        mpatches.Patch(color="#0d47a1",            label="Bus Stop"),
     ]
     if legend_walk is not None:
         legend_handles.append(legend_walk)
@@ -832,3 +842,90 @@ def generate_context(
     buf.seek(0)
     log.info("[context] Done.")
     return buf
+
+
+# ============================================================
+# STARTUP CACHE WARMER
+#
+# Call warm_cache(ZONE_DATA) from app.py lifespan startup.
+# Fetches OSM data for common HK sites in background daemon threads
+# so the first real user request hits the module cache instead of
+# making cold Overpass calls.
+#
+# Usage in app.py:
+#   from modules.context import warm_cache
+#
+#   @asynccontextmanager
+#   async def lifespan(app: FastAPI):
+#       import asyncio, functools
+#       loop = asyncio.get_event_loop()
+#       loop.run_in_executor(None, functools.partial(warm_cache, ZONE_DATA))
+#       yield
+#
+# ============================================================
+
+# Common HK sites — covers the most frequent analysis requests.
+# Each entry: (lat, lon, label)
+_WARM_SITES = [
+    (22.28369, 114.14837, "Sheung Wan / IL 1657"),
+    (22.28194, 114.15694, "Central / IL 157"),
+    (22.31667, 114.18333, "Mong Kok"),
+    (22.29833, 114.17194, "Wan Chai"),
+    (22.27667, 114.18250, "Causeway Bay"),
+    (22.32194, 114.16944, "Yau Ma Tei"),
+]
+
+_WARM_TAGS = [
+    {"landuse": True, "leisure": ["park", "playground", "garden", "recreation_ground"]},
+    {"building": ["apartments", "residential", "house", "dormitory"]},
+    {"amenity": ["school", "hospital", "supermarket", "kindergarten"]},
+    {"highway": "bus_stop"},
+    {"railway": "station"},
+]
+
+
+def warm_cache(ZONE_DATA: gpd.GeoDataFrame) -> None:
+    """
+    Pre-warm the OSM feature cache for common HK sites.
+    Runs in a background daemon thread — never blocks startup.
+    Safe to call even if ZONE_DATA is None (skips zoning lookup).
+    """
+    log.info("[context] cache warmer started")
+
+    def _warm_one(lat, lon, label, tags):
+        ck = (round(lat, 2), round(lon, 2), FETCH_RADIUS, _tags_hash(tags))
+        with _FEATURE_CACHE_LOCK:
+            if ck in _FEATURE_CACHE:
+                return   # already cached
+        try:
+            result = [_EMPTY.copy()]
+            done   = [False]
+
+            def _fetch():
+                for endpoint in _OVERPASS_ENDPOINTS:
+                    try:
+                        ox.settings.overpass_endpoint = endpoint
+                        gdf = ox.features_from_point(
+                            (lat, lon), dist=FETCH_RADIUS, tags=tags
+                        )
+                        if gdf is not None and not gdf.empty:
+                            result[0] = gdf.to_crs(3857)
+                        done[0] = True
+                        with _FEATURE_CACHE_LOCK:
+                            _FEATURE_CACHE[ck] = result[0]
+                        return
+                    except Exception:
+                        continue
+                done[0] = True
+
+            t = threading.Thread(target=_fetch, daemon=True)
+            t.start()
+            t.join(timeout=60)
+        except Exception as e:
+            log.debug(f"[context] warmer {label}: {e}")
+
+    for lat, lon, label in _WARM_SITES:
+        for tags in _WARM_TAGS:
+            _warm_one(lat, lon, label, tags)
+
+    log.info("[context] cache warmer complete")
