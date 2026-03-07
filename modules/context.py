@@ -457,18 +457,19 @@ def generate_context(
 
     all_labels.sort(key=lambda x: x[0])
     label_items = [(g, t) for _, g, t in all_labels[:28]]
-    log.info(f"[context] labels: {len(label_items)}, walk={'yes' if route_gdf is not None else 'no'}")
+    log.info(f"[context] labels: {len(label_items)}")
 
     del base, results, labels_raw, support_raw
     gc.collect()
 
     # ── Collect walk route result (was computing in background) ──────────────
-    route_gdf = None
+    route_gdf = None  # always initialize first
     if _walk_future is not None:
         try:
-            route_gdf = _walk_future.result(timeout=5)  # at most 5s extra wait
+            route_gdf = _walk_future.result(timeout=5)
         except Exception as e:
             log.warning(f"[context] walk collect: {e}")
+            route_gdf = None
     try:
         _walk_executor.shutdown(wait=False)
     except Exception:
