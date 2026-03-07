@@ -1,601 +1,461 @@
 """
-context.py — Site-Type Driven Context Analysis
-ALKF+ Module
+context.py — Site-Type-Driven Context Analysis Map
+====================================================
+Replaces the generic land-use context map with a development-type-driven
+analysis.  The layers shown depend on the OZP zone of the queried site.
 
-Output matches Colab reference:
-  - Real site building footprint (red polygon)
-  - MTR station yellow polygon + MTR logo icon
-  - Bus stops with bus icon (clustered)
-  - Type-driven building highlights per site type
-  - Landuse fills: residential, industrial, parks, schools, hospitals
-  - Place labels for nearby amenities
-
-NO walk route — removed to eliminate blocking network call.
-All fetches run in parallel (3 threads) — total fetch time ~20s max.
+Site types and their relevant layers
+-------------------------------------
+RESIDENTIAL   : residential, schools, parks, hospitals, supermarkets, MTR
+HOTEL         : hotels/tourism, restaurants, shopping, attractions, MTR
+OFFICE        : offices/business, banks, restaurants, transport nodes, MTR
+COMMERCIAL    : retail/malls, restaurants, cinemas, parking, MTR
+INDUSTRIAL    : industrial, warehouses, logistics, highways, freight rail
+(fallback)    : all amenity + leisure + landuse layers
 """
 
 import logging
 import os
-import gc
-import threading
-import osmnx as ox
-import geopandas as gpd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import contextily as cx
-import numpy as np
-import textwrap
-import pandas as pd
-import networkx as nx
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List
-from shapely.geometry import Point
+import contextily as cx
+import geopandas as gpd
+import matplotlib.patches as mpatches
+import matplotlib.pyplot as plt
+import networkx as nx
+import numpy as np
+import osmnx as ox
+import textwrap
 from io import BytesIO
-import matplotlib.image as mpimg
-from matplotlib.offsetbox import OffsetImage, AnnotationBbox
-import time as _time
+from matplotlib.offsetbox import AnnotationBbox, OffsetImage
+from PIL import Image
+from pyproj import Transformer
+from shapely.geometry import Point
+from sklearn.cluster import KMeans
 
 from modules.resolver import resolve_location, get_lot_boundary
 
 log = logging.getLogger(__name__)
 
-# ── OSMnx settings (set once at module level — never mutated in threads) ──────
-ox.settings.use_cache           = True
-ox.settings.log_console         = False
-ox.settings.timeout             = 20   # Overpass server-side query timeout (fills {timeout} in QL)
-ox.settings.requests_timeout    = 22   # HTTP socket timeout (client-side)
-# ox.settings.overpass_settings template = "[out:json][timeout:{timeout}]"
-# {timeout} is filled from ox.settings.timeout above — do NOT override the template directly
+ox.settings.use_cache = True
+ox.settings.log_console = False
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-FETCH_RADIUS  = 600
-MAP_HALF_SIZE = 800
-MTR_COLOR     = "#ffd166"
-BUS_COLOR     = "#0d47a1"
+# ── Static asset paths ────────────────────────────────────────────────────────
+_BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+_STATIC_DIR = os.path.join(_BASE_DIR, "static")
+_MTR_LOGO   = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
+_BUS_ICON   = os.path.join(_STATIC_DIR, "bus.png")
 
-# ── Static assets ─────────────────────────────────────────────────────────────
-_STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
-_MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
-_BUS_ICON_PATH = os.path.join(_STATIC_DIR, "bus.png")
+# ── Colour palette ────────────────────────────────────────────────────────────
+COLOURS = {
+    "residential"  : "#f2c6a0",
+    "industrial"   : "#b39ddb",
+    "park"         : "#b7dfb9",
+    "school"       : "#9ecae1",
+    "hospital"     : "#f48fb1",
+    "hotel"        : "#ffe082",
+    "office"       : "#80cbc4",
+    "retail"       : "#ef9a9a",
+    "restaurant"   : "#ffcc80",
+    "attraction"   : "#ce93d8",
+    "warehouse"    : "#bcaaa4",
+    "building"     : "#d9d9d9",
+    "site"         : "#e53935",
+    "route"        : "#005eff",
+    "mtr"          : "#ffd166",
+}
 
-try:
-    _mtr_logo        = mpimg.imread(_MTR_LOGO_PATH)
-    _MTR_LOGO_LOADED = True
-    log.info("[context] MTR logo loaded")
-except Exception as e:
-    _mtr_logo        = None
-    _MTR_LOGO_LOADED = False
-    log.warning(f"[context] MTR logo missing: {e}")
-
-try:
-    _bus_img = mpimg.imread(_BUS_ICON_PATH)
-    log.info("[context] bus icon loaded")
-except Exception as e:
-    _bus_img = None
-    log.warning(f"[context] bus icon missing: {e}")
-
-_EMPTY = gpd.GeoDataFrame(geometry=[], crs=3857)
-
-# ── Overpass endpoints ────────────────────────────────────────────────────────
-_OVERPASS_ENDPOINTS = [
-    "https://overpass-api.de/api/interpreter",
-    "https://overpass.kumi.systems/api/interpreter",
-    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
-]
+MAP_HALF_SIZE   = 900   # metres (web-mercator)
+FETCH_RADIUS    = 1500  # OSM fetch radius in metres
+MTR_FETCH_DIST  = 2000  # MTR station search radius
 
 
-# ============================================================
-# SITE TYPE INFERENCE
-# ============================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# Zone → site type helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-def infer_site_type(zone: str) -> str:
+def _infer_site_type(zone: str) -> str:
     z = zone.upper()
-    if z.startswith("R"):                        return "RESIDENTIAL"
-    if z.startswith("C"):                        return "COMMERCIAL"
-    if z.startswith("G"):                        return "INSTITUTIONAL"
-    if "HOTEL" in z or z.startswith("OU(H)"):   return "HOTEL"
-    if z.startswith("OU"):                       return "OTHER"
-    if z.startswith("I"):                        return "INDUSTRIAL"
+    if z.startswith("R"):                    return "RESIDENTIAL"
+    if z.startswith("C") or "COMM" in z:    return "COMMERCIAL"
+    if "HOTEL" in z:                         return "HOTEL"
+    if z.startswith("G") or "INST" in z:    return "INSTITUTIONAL"
+    if z.startswith("I") or "IND" in z:     return "INDUSTRIAL"
+    if "OFFICE" in z or "B" == z[:1]:       return "OFFICE"
+    if z.startswith("OU"):                   return "MIXED"
     return "MIXED"
 
 
-# ============================================================
-# SITE-TYPE HIGHLIGHT CONFIG
-# ============================================================
-
-_HIGHLIGHT = {
-    "RESIDENTIAL": {
-        "building": ["apartments", "residential", "house",
-                     "dormitory", "detached", "terrace", "block"],
-        "color":    "#e07b39",
-        "label":    "Residential Developments",
-    },
-    "HOTEL": {
-        "tourism":  ["hotel", "hostel", "resort", "guest_house", "aparthotel"],
-        "building": ["hotel"],
-        "color":    "#b15928",
-        "label":    "Hotels & Serviced Apartments",
-    },
-    "COMMERCIAL": {
-        "building": ["office", "commercial", "retail"],
-        "office":   True,
-        "color":    "#6a3d9a",
-        "label":    "Office / Commercial Buildings",
-    },
-    "INSTITUTIONAL": {
-        "amenity":  ["school", "college", "university", "hospital", "government"],
-        "building": ["school", "university", "hospital", "government", "civic"],
-        "color":    "#1f78b4",
-        "label":    "Institutional Buildings",
-    },
-    "INDUSTRIAL": {
-        "building": ["industrial", "warehouse", "factory", "shed"],
-        "color":    "#33a02c",
-        "label":    "Industrial / Warehouse",
-    },
-    "OTHER":  {"building": True, "color": "#888888", "label": "Nearby Buildings"},
-    "MIXED":  {"building": True, "color": "#888888", "label": "Nearby Buildings"},
-}
+def _osm_tags_for(site_type: str) -> dict:
+    """Return OSM tag dict for features_from_point based on site type."""
+    base = {"building": True, "landuse": True}
+    if site_type == "RESIDENTIAL":
+        return {**base, "leisure": ["park", "playground"],
+                "amenity": ["school", "college", "university",
+                             "hospital", "clinic",
+                             "supermarket", "marketplace"]}
+    if site_type == "HOTEL":
+        return {**base, "tourism": True,
+                "amenity": ["restaurant", "cafe", "bar",
+                             "theatre", "cinema"],
+                "shop":    ["mall", "department_store"]}
+    if site_type == "OFFICE":
+        return {**base,
+                "office": True,
+                "amenity": ["bank", "restaurant", "cafe",
+                             "parking", "bus_station"],
+                "landuse": ["commercial", "retail"]}
+    if site_type == "COMMERCIAL":
+        return {**base,
+                "shop":   ["mall", "department_store", "supermarket"],
+                "amenity": ["restaurant", "cinema", "parking",
+                             "fast_food", "cafe"],
+                "landuse": ["retail", "commercial"]}
+    if site_type == "INDUSTRIAL":
+        return {**base,
+                "landuse": ["industrial", "warehouse", "logistics"],
+                "man_made": ["works", "storage_tank"],
+                "railway":  ["rail", "freight"]}
+    # fallback / INSTITUTIONAL / MIXED
+    return {**base, "amenity": True, "leisure": True, "tourism": True}
 
 
-# ============================================================
-# OSM FETCH — bbox query, endpoint rotation, thread-safe
-# ============================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer extraction helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
-def _fetch_osm(lat: float, lon: float,
-               dist: float, tags: dict) -> gpd.GeoDataFrame:
-    """
-    Wrapper: use direct HTTP fetch (hard timeout) for polygon-heavy queries,
-    fall back to OSMnx for small point queries if direct fails.
-    """
-    return _fetch_osm_direct(lat, lon, dist, tags)
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def _safe_get(gdf: gpd.GeoDataFrame, col: str) -> pd.Series:
-    if col in gdf.columns:
-        return gdf[col].fillna("")
-    return pd.Series("", index=gdf.index)
+def _safe(gdf, col, values):
+    """Filter a GeoDataFrame by column values; returns empty GDF on failure."""
+    try:
+        if col not in gdf.columns:
+            return gdf.iloc[0:0]
+        if values is True:
+            return gdf[gdf[col].notna()]
+        if isinstance(values, str):
+            values = [values]
+        return gdf[gdf[col].isin(values)]
+    except Exception:
+        return gdf.iloc[0:0]
 
 
-def _filter(gdf: gpd.GeoDataFrame, col: str, val) -> gpd.GeoDataFrame:
-    if gdf.empty or col not in gdf.columns:
-        return _EMPTY.copy()
-    s = gdf[col].fillna("")
-    return gdf[s.isin(val) if isinstance(val, list) else (s == val)].copy()
+def _extract_layers(feats: gpd.GeoDataFrame, site_type: str) -> dict:
+    """Return a dict of {layer_name: GeoDataFrame} for the given site type."""
+    layers: dict[str, gpd.GeoDataFrame] = {}
+
+    def add(name, col, vals):
+        layers[name] = _safe(feats, col, vals)
+
+    buildings = _safe(feats, "building", True)
+
+    if site_type == "RESIDENTIAL":
+        add("Residential Area",  "landuse",  ["residential"])
+        add("Park / Greenspace", "leisure",  ["park", "playground"])
+        add("School / Education","amenity",  ["school", "college", "university"])
+        add("Hospital / Clinic", "amenity",  ["hospital", "clinic"])
+        add("Supermarket",       "amenity",  ["supermarket", "marketplace"])
+        layers["Buildings (context)"] = buildings
+
+    elif site_type == "HOTEL":
+        add("Hotel / Resort",    "tourism",  ["hotel", "hostel",
+                                               "resort", "guest_house"])
+        add("Tourist Attraction","tourism",  ["attraction", "museum",
+                                               "gallery", "viewpoint"])
+        add("Restaurant / Cafe", "amenity",  ["restaurant", "cafe",
+                                               "bar", "fast_food"])
+        add("Shopping",          "shop",     ["mall", "department_store"])
+        layers["Buildings (context)"] = buildings
+
+    elif site_type == "OFFICE":
+        add("Office / Business", "office",   True)
+        add("Commercial Zone",   "landuse",  ["commercial", "retail"])
+        add("Bank",              "amenity",  ["bank"])
+        add("Restaurant / Cafe", "amenity",  ["restaurant", "cafe"])
+        layers["Buildings (context)"] = buildings
+
+    elif site_type == "COMMERCIAL":
+        add("Retail / Mall",     "shop",     ["mall", "department_store",
+                                               "supermarket"])
+        add("Retail Landuse",    "landuse",  ["retail", "commercial"])
+        add("Restaurant / Cafe", "amenity",  ["restaurant", "cafe",
+                                               "fast_food"])
+        add("Cinema / Leisure",  "amenity",  ["cinema", "theatre"])
+        add("Parking",           "amenity",  ["parking"])
+        layers["Buildings (context)"] = buildings
+
+    elif site_type == "INDUSTRIAL":
+        add("Industrial Zone",   "landuse",  ["industrial"])
+        add("Warehouse / Logistics","landuse",["warehouse", "logistics"])
+        add("Works / Facility",  "man_made", ["works", "storage_tank"])
+        layers["Buildings (context)"] = buildings
+
+    else:  # MIXED / INSTITUTIONAL / fallback
+        add("Residential Area",  "landuse",  ["residential"])
+        add("Commercial Zone",   "landuse",  ["commercial", "retail"])
+        add("Park / Greenspace", "leisure",  ["park"])
+        add("School / Education","amenity",  ["school", "college", "university"])
+        add("Hospital / Clinic", "amenity",  ["hospital", "clinic"])
+        layers["Buildings (context)"] = buildings
+
+    return layers
 
 
-def _polys(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
-    if gdf.empty:
-        return _EMPTY.copy()
-    return gdf[gdf.geometry.geom_type.isin(
-        ["Polygon", "MultiPolygon"])].copy()
+# ─────────────────────────────────────────────────────────────────────────────
+# Plot helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_LAYER_COLOURS = [
+    "#f2c6a0", "#9ecae1", "#b7dfb9", "#f48fb1", "#ffe082",
+    "#80cbc4", "#ef9a9a", "#ffcc80", "#ce93d8", "#bcaaa4",
+]
 
 
-def _get_name(gdf: gpd.GeoDataFrame) -> pd.Series:
-    en   = _safe_get(gdf, "name:en")
-    base = _safe_get(gdf, "name")
-    return en.where(en != "", base)
-
-
-def _ascii(text) -> Optional[str]:
-    if not text or not isinstance(text, str):
+def _load_icon(path: str, zoom: float = 0.035) -> OffsetImage | None:
+    try:
+        img = Image.open(path).convert("RGBA")
+        return OffsetImage(np.array(img), zoom=zoom)
+    except Exception as e:
+        log.debug("Icon load failed %s: %s", path, e)
         return None
-    s = text.strip()
-    if not s:
-        return None
-    if sum(1 for c in s if ord(c) < 128) / max(len(s), 1) < 0.5:
-        return None
-    return "".join(c for c in s if ord(c) < 128).strip() or None
+
+
+def _place_icon(ax, x: float, y: float, imagebox: OffsetImage):
+    ab = AnnotationBbox(imagebox, (x, y),
+                        frameon=False, zorder=15, pad=0)
+    ax.add_artist(ab)
 
 
 def _wrap(text: str, width: int = 18) -> str:
     return "\n".join(textwrap.wrap(str(text), width))
 
 
-def _safe_plot(gdf, ax, **kw):
-    try:
-        if not gdf.empty:
-            gdf.plot(ax=ax, **kw)
-    except Exception as e:
-        log.debug(f"[context] plot: {e}")
-
-
-def _draw_mtr_icon(ax, x, y, zoom=0.035, zorder=14):
-    """Draw MTR logo at (x,y). Falls back to red circle if logo missing."""
-    if _MTR_LOGO_LOADED and _mtr_logo is not None:
-        icon = OffsetImage(_mtr_logo, zoom=zoom)
-        icon.image.axes = ax
-        ax.add_artist(AnnotationBbox(
-            icon, (x, y), frameon=False,
-            zorder=zorder, box_alignment=(0.5, 0.5)))
-    else:
-        ax.plot(x, y, "o", color="#ED1D24", markersize=12,
-                markeredgecolor="white", markeredgewidth=2, zorder=zorder)
-
-
-def _draw_bus_icon(ax, x, y, zoom=0.028, zorder=9):
-    """Draw bus icon at (x,y). Falls back to dark blue square if icon missing."""
-    if _bus_img is not None:
-        icon = OffsetImage(_bus_img, zoom=zoom)
-        icon.image.axes = ax
-        ax.add_artist(AnnotationBbox(
-            icon, (x, y), frameon=False,
-            zorder=zorder, box_alignment=(0.5, 0.5)))
-    else:
-        ax.plot(x, y, "s", color=BUS_COLOR, markersize=10,
-                markeredgecolor="white", markeredgewidth=1, zorder=zorder)
-
-
-# ============================================================
-# MAIN GENERATOR
-# ============================================================
+# ─────────────────────────────────────────────────────────────────────────────
+# Main generator
+# ─────────────────────────────────────────────────────────────────────────────
 
 def generate_context(
     data_type: str,
-    value: str,
-    ZONE_DATA: gpd.GeoDataFrame,
-    radius_m: Optional[int] = None,
-    lon: float = None,
-    lat: float = None,
-    lot_ids: List[str] = None,
-    extents: List[dict] = None,
-    show_walk_route: bool = False,   # disabled — removed to prevent blocking
-):
-    t0 = _time.monotonic()
+    value:     str,
+    zone_data: gpd.GeoDataFrame,
+    radius_m:  int | None,
+    lon:       float | None = None,
+    lat:       float | None = None,
+    lot_ids:   list  | None = None,
+    extents:   list  | None = None,
+) -> BytesIO:
 
-    lon, lat  = resolve_location(data_type, value, lon, lat, lot_ids, extents)
-    fetch_r   = radius_m if radius_m is not None else FETCH_RADIUS
-    half_size = radius_m if radius_m is not None else MAP_HALF_SIZE
-    half_x    = half_size * (992 / 737)
-    half_y    = half_size
+    lot_ids  = lot_ids  or []
+    extents  = extents  or []
+    radius_m = radius_m or 600
 
-    log.info(f"[context] lon={lon:.5f} lat={lat:.5f} r={fetch_r}m")
+    # ── 1. Resolve coordinates ────────────────────────────────────────────────
+    lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
+    site_pt_wgs = Point(lon, lat)
+    site_pt  = gpd.GeoSeries([site_pt_wgs], crs=4326).to_crs(3857).iloc[0]
 
-    # ── Site polygon ──────────────────────────────────────────────────────────
-    try:
-        lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
-    except Exception as e:
-        log.warning(f"[context] lot boundary: {e}")
-        lot_gdf = None
-
-    if lot_gdf is not None and not lot_gdf.empty:
-        site_geom  = lot_gdf.geometry.iloc[0]
-        site_point = site_geom.centroid
-        log.info(f"[context] lot boundary area={site_geom.area:.0f}m²")
+    # ── 2. Zoning lookup ──────────────────────────────────────────────────────
+    primary_hits = zone_data[zone_data.contains(site_pt)]
+    if primary_hits.empty:
+        # nearest zone as fallback
+        zone_data["_d"] = zone_data.geometry.distance(site_pt)
+        primary_row = zone_data.sort_values("_d").iloc[0]
     else:
-        site_point = gpd.GeoSeries(
-            [Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_geom  = site_point.buffer(15)
-        log.info("[context] fallback point")
+        primary_row = primary_hits.iloc[0]
 
-    # ── Zoning ────────────────────────────────────────────────────────────────
-    ozp  = ZONE_DATA.to_crs(3857)
-    hits = ozp[ozp.contains(site_point)]
-    if hits.empty:
-        raise ValueError("No zoning polygon found for this site.")
-    zone_row  = hits.iloc[0]
-    zone      = zone_row["ZONE_LABEL"]
-    SITE_TYPE = infer_site_type(zone)
-    hi_cfg    = _HIGHLIGHT.get(SITE_TYPE, _HIGHLIGHT["MIXED"])
-    hi_color  = hi_cfg["color"]
-    hi_label  = hi_cfg["label"]
-    log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
+    zone      = str(primary_row.get("ZONE_LABEL", "MIXED"))
+    plan_no   = str(primary_row.get("PLAN_NO",    "N/A"))
+    site_type = _infer_site_type(zone)
 
-    # ── 3 parallel fetches: polygons + MTR stations + bus stops ──────────────
-    # No walk graph — eliminated to remove the 25-30s blocking call
-    log.info("[context] Fetching OSM (parallel: polygons + MTR + bus)...")
-    t_fetch = _time.monotonic()
+    log.info("Context: zone=%s  site_type=%s  radius=%dm", zone, site_type, radius_m)
 
-    _poly_result = [_EMPTY.copy()]
-    _stn_result  = [_EMPTY.copy()]
-    _bus_result  = [_EMPTY.copy()]
-
-    def _fetch_polygons():
-        r = _fetch_osm(lat, lon, max(fetch_r, 1200), {
-            "landuse": True, "leisure": True, "amenity": True,
-            "building": True, "tourism": True, "office": True,
-        })
-        _poly_result[0] = r
-        log.info(f"[context] polygons: {len(r)} rows "
-                 f"in {_time.monotonic()-t_fetch:.1f}s")
-
-    def _fetch_stations():
-        r = _fetch_osm(lat, lon, 2000, {"railway": "station"})
-        _stn_result[0] = r
-        log.info(f"[context] stations: {len(r)} rows")
-
-    def _fetch_bus():
-        r = _fetch_osm(lat, lon, 500, {"highway": "bus_stop"})
-        _bus_result[0] = r
-        log.info(f"[context] bus raw: {len(r)} rows")
-
-    # Submit fetches to a NON-context-manager executor.
-    # CRITICAL: do NOT use "with ThreadPoolExecutor" here.
-    # ThreadPoolExecutor.__exit__ calls shutdown(wait=True) which joins
-    # ALL threads — including zombie threads that ignored f.cancel().
-    # Instead: call shutdown(wait=False) after cf.wait() so the main thread
-    # is never held hostage by a slow Overpass polygon fetch.
-    import concurrent.futures as _cf
-    _pool = ThreadPoolExecutor(max_workers=3)
-    futs = {
-        _pool.submit(_fetch_polygons): "polygons",
-        _pool.submit(_fetch_stations): "stations",
-        _pool.submit(_fetch_bus):      "bus",
-    }
-    done, pending = _cf.wait(futs, timeout=28,
-                             return_when=_cf.ALL_COMPLETED)
-    for f in pending:
-        log.warning(f"[context] {futs[f]} fetch timed out — skipping")
-    for f in done:
-        try:
-            f.result()
-        except Exception as e:
-            log.warning(f"[context] fetch error ({futs[f]}): {e}")
-    _pool.shutdown(wait=False)  # release pool; zombie threads run to completion
-                                # in the background but main thread is NOT blocked
-
-    log.info(f"[context] all fetches done in "
-             f"{_time.monotonic()-t_fetch:.1f}s")
-
-    polygons = _poly_result[0]
-
-    # ── Base layers ───────────────────────────────────────────────────────────
-    residential_area = _filter(polygons, "landuse", "residential")
-    industrial_area  = _filter(polygons, "landuse",
-                                ["industrial", "commercial"])
-    parks            = _filter(polygons, "leisure",
-                                ["park", "garden", "playground",
-                                 "recreation_ground"])
-    schools          = _filter(polygons, "amenity",
-                                ["school", "college", "university",
-                                 "kindergarten"])
-    hospitals        = _filter(polygons, "amenity", ["hospital", "clinic"])
-
-    # ── Type-driven highlight buildings ───────────────────────────────────────
-    hi_buildings = _EMPTY.copy()
-    if not polygons.empty:
-        mask = pd.Series(False, index=polygons.index)
-
-        b_cfg = hi_cfg.get("building")
-        if b_cfg is True:
-            mask |= _safe_get(polygons, "building").str.len() > 0
-        elif isinstance(b_cfg, list):
-            mask |= _safe_get(polygons, "building").isin(b_cfg)
-
-        t_cfg = hi_cfg.get("tourism")
-        if isinstance(t_cfg, list):
-            mask |= _safe_get(polygons, "tourism").isin(t_cfg)
-
-        if hi_cfg.get("office") is True:
-            mask |= _safe_get(polygons, "office").str.len() > 0
-
-        a_cfg = hi_cfg.get("amenity")
-        if isinstance(a_cfg, list):
-            mask |= _safe_get(polygons, "amenity").isin(a_cfg)
-
-        hi_raw = _polys(polygons[mask].copy())
-        if not hi_raw.empty:
-            names  = _get_name(hi_raw)
-            named  = names.apply(lambda x: bool(_ascii(str(x))))
-            large  = hi_raw.geometry.area >= 600
-            hi_buildings = hi_raw[named | large].copy()
-
-        log.info(f"[context] highlight buildings: {len(hi_buildings)}")
-
-    # ── Site footprint from nearest OSM building ──────────────────────────────
-    site_render_geom = site_geom
-    if not polygons.empty:
-        try:
-            nearby = _polys(polygons[
-                polygons.geometry.distance(site_point) < 40])
-            if not nearby.empty:
-                best = nearby.assign(_a=nearby.area).sort_values(
-                    "_a", ascending=False).geometry.iloc[0]
-                site_render_geom = best
-                log.info(f"[context] site footprint: {best.area:.0f}m²")
-            elif site_geom.area < 200:
-                site_render_geom = site_point.buffer(20)
-        except Exception as e:
-            log.debug(f"[context] site footprint: {e}")
-    elif site_geom.area < 200:
-        site_render_geom = site_point.buffer(20)
-
-    site_gdf = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
-    del polygons
-    gc.collect()
-
-    # ── MTR stations ──────────────────────────────────────────────────────────
-    stations_plot = _EMPTY.copy()
-    nearest_name  = None
-
-    if not _stn_result[0].empty:
-        s          = _stn_result[0].copy()
-        s["_name"] = _get_name(s)
-        s["_cx"]   = s.geometry.centroid.x
-        s["_cy"]   = s.geometry.centroid.y
-        s["_dist"] = s.apply(
-            lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1)
-        s = s.dropna(subset=["_name"]).sort_values("_dist")
-        stations_plot = s[s["_dist"] <= half_size * 1.5].head(3).copy()
-        if not s.empty:
-            nearest_name = _ascii(str(s.iloc[0]["_name"]))
-            log.info(f"[context] nearest MTR: {nearest_name} "
-                     f"({s.iloc[0]['_dist']:.0f}m)")
-
-    # ── Bus stops ─────────────────────────────────────────────────────────────
-    bus_stops = _EMPTY.copy()
-    if not _bus_result[0].empty:
-        bs = _bus_result[0].copy()
-        bs["geometry"] = bs.geometry.apply(
-            lambda g: g.centroid if g.geom_type != "Point" else g)
-        bus_stops = gpd.GeoDataFrame(bs, crs=3857)
-        if len(bus_stops) > 6:
-            try:
-                from sklearn.cluster import KMeans
-                coords = np.array([[g.x, g.y] for g in bus_stops.geometry])
-                bus_stops["_cl"] = KMeans(
-                    n_clusters=6, random_state=0).fit(coords).labels_
-                bus_stops = gpd.GeoDataFrame(
-                    bus_stops.groupby("_cl").first(), crs=3857
-                ).reset_index(drop=True)
-            except Exception:
-                bus_stops = bus_stops.head(6)
-        log.info(f"[context] bus stops: {len(bus_stops)}")
-
-    # ── Place labels ──────────────────────────────────────────────────────────
-    # Labels fetch — also bounded to 20s
-    _lbl_result = [_EMPTY.copy()]
-    def _fetch_labels():
-        _lbl_result[0] = _fetch_osm(lat, lon, min(fetch_r, 800), {
-            "amenity": ["school", "college", "university", "hospital",
-                        "clinic", "supermarket", "library", "restaurant"],
-            "leisure": ["park", "garden"],
-            "place":   ["neighbourhood", "suburb"],
-            "tourism": ["attraction"],
-        })
-    lbl_thread = threading.Thread(target=_fetch_labels, daemon=True)
-    lbl_thread.start()
-    lbl_thread.join(timeout=25)  # 20s server + 5s transfer
-    if lbl_thread.is_alive():
-        log.warning("[context] labels fetch timed out — skipping")
-    labels_gdf = _lbl_result[0]
-
-    label_items = []
-    seen_text   = set()
-
-    def _harvest(gdf):
-        if gdf is None or gdf.empty:
-            return
-        g = gdf.copy()
-        g["_lb"] = _get_name(g)
-        for _, row in g.iterrows():
-            text = _ascii(str(row.get("_lb", "") or "").strip())
-            if not text or text in seen_text:
-                continue
-            seen_text.add(text)
-            geom = row.geometry
-            try:
-                p = (geom.representative_point()
-                     if hasattr(geom, "representative_point")
-                     else geom.centroid)
-                label_items.append((p.distance(site_point), geom, text))
-            except Exception:
-                continue
-
-    _harvest(labels_gdf)
-    _harvest(schools)
-    _harvest(hospitals)
-    _harvest(parks)
-    label_items.sort(key=lambda x: x[0])
-    label_items = [(g, t) for _, g, t in label_items[:28]]
-    log.info(f"[context] labels: {len(label_items)}")
-
-    del labels_gdf
-    gc.collect()
-
-    log.info(f"[context] Rendering — "
-             f"hi={len(hi_buildings)} "
-             f"stn={len(stations_plot)} "
-             f"bus={len(bus_stops)}")
-
-    # ============================================================
-    # RENDER
-    # ============================================================
-    fig, ax = plt.subplots(figsize=(14, 10.5))
-
-    xmin = site_point.x - half_x;  xmax = site_point.x + half_x
-    ymin = site_point.y - half_y;  ymax = site_point.y + half_y
-
-    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-    ax.set_aspect("equal"); ax.autoscale(False)
-
-    # Basemap
+    # ── 3. Fetch OSM features ─────────────────────────────────────────────────
+    tags = _osm_tags_for(site_type)
     try:
-        cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
-                       zoom=15, alpha=0.95)
-    except Exception:
-        try:
-            cx.add_basemap(ax, source=cx.providers.CartoDB.Positron,
-                           zoom=15, alpha=0.95)
-        except Exception as e:
-            log.warning(f"[context] basemap: {e}")
-
-    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-    ax.set_aspect("equal"); ax.autoscale(False)
-
-    # zorder 1-2: Landuse fills
-    _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
-    _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
-    _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
-    _safe_plot(schools,          ax, color="#9ecae1", alpha=0.90, zorder=2)
-    _safe_plot(hospitals,        ax, color="#aec6cf", alpha=0.90, zorder=2)
-    del residential_area, industrial_area, parks, schools, hospitals
-    gc.collect()
-
-    # zorder 3: Type-driven highlight buildings
-    _safe_plot(hi_buildings, ax, color=hi_color, alpha=0.82,
-               zorder=3, edgecolor="white", linewidth=0.3)
-    del hi_buildings
-    gc.collect()
-
-    # zorder 9: Bus stops with icon
-    if not bus_stops.empty:
-        for _, row in bus_stops.iterrows():
-            try:
-                g  = row.geometry
-                pt = g if g.geom_type == "Point" else g.centroid
-                _draw_bus_icon(ax, pt.x, pt.y, zoom=0.028, zorder=9)
-            except Exception as e:
-                log.debug(f"[context] bus icon: {e}")
-    del bus_stops
-    gc.collect()
-
-    # zorder 10 + 14: MTR station polygon + logo icon
-    if not stations_plot.empty:
-        try:
-            _safe_plot(_polys(stations_plot), ax,
-                       facecolor=MTR_COLOR, edgecolor="none",
-                       alpha=0.9, zorder=10)
-            for _, st in stations_plot.iterrows():
-                _draw_mtr_icon(ax, st["_cx"], st["_cy"],
-                               zoom=0.035, zorder=14)
-        except Exception as e:
-            log.debug(f"[context] station render: {e}")
-
-    # zorder 14-16: Site polygon (white glow + red fill)
-    try:
-        site_gdf.plot(ax=ax, facecolor="none", edgecolor="white",
-                      linewidth=6.0, zorder=14)
-        site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="#b71c1c",
-                      linewidth=2.5, zorder=15)
-        sc = site_render_geom.centroid
-        ax.text(sc.x, sc.y, "SITE", color="white", weight="bold",
-                fontsize=9, ha="center", va="center", zorder=16)
+        feats = ox.features_from_point(
+            (lat, lon), dist=FETCH_RADIUS, tags=tags
+        ).to_crs(3857)
     except Exception as e:
-        log.warning(f"[context] site render: {e}")
+        log.warning("OSM features fetch failed: %s", e)
+        feats = gpd.GeoDataFrame(columns=["geometry"], crs=3857)
 
-    # zorder 12: Place labels
-    placed  = []
-    offsets = [(0,40),(0,-40),(40,0),(-40,0),
-               (28,28),(-28,28),(28,-28),(-28,-28)]
+    layers = _extract_layers(feats, site_type)
 
-    for i, (geom, text) in enumerate(label_items):
+    # ── 4. Site footprint ─────────────────────────────────────────────────────
+    site_boundary = get_lot_boundary(lon, lat, data_type,
+                                     extents if len(extents) > 1 else None)
+    if site_boundary is not None and not site_boundary.empty:
+        site_geom = site_boundary.geometry.unary_union
+    else:
+        # fall back to OSM polygon near point
+        polys = feats[
+            feats.geometry.geom_type.isin(["Polygon", "MultiPolygon"]) &
+            (feats.geometry.distance(site_pt) < 40)
+        ] if not feats.empty else gpd.GeoDataFrame()
+        if not polys.empty:
+            site_geom = (
+                polys.assign(_a=polys.area)
+                     .sort_values("_a", ascending=False)
+                     .geometry.iloc[0]
+            )
+        else:
+            site_geom = site_pt.buffer(40)
+
+    site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
+
+    # ── 5. MTR stations ───────────────────────────────────────────────────────
+    try:
+        stations = ox.features_from_point(
+            (lat, lon), tags={"railway": "station"}, dist=MTR_FETCH_DIST
+        ).to_crs(3857)
+        if not stations.empty:
+            name_col = (stations.get("name:en")
+                        if "name:en" in stations.columns
+                        else stations.get("name"))
+            stations = stations.copy()
+            stations["_name"]    = name_col
+            stations["_centroid"] = stations.geometry.centroid
+            stations["_dist"]    = stations["_centroid"].distance(site_pt)
+            stations = (stations.dropna(subset=["_name"])
+                                .sort_values("_dist").head(2))
+    except Exception:
+        stations = gpd.GeoDataFrame()
+
+    # ── 6. Bus stops (clustered) ──────────────────────────────────────────────
+    try:
+        bus_stops = ox.features_from_point(
+            (lat, lon), tags={"highway": "bus_stop"}, dist=900
+        ).to_crs(3857)
+        if len(bus_stops) > 6:
+            arr = np.array([[g.x, g.y] for g in bus_stops.geometry])
+            bus_stops = bus_stops.copy()
+            bus_stops["_cl"] = (KMeans(n_clusters=6, random_state=0)
+                                .fit(arr).labels_)
+            bus_stops = bus_stops.groupby("_cl").first()
+    except Exception:
+        bus_stops = gpd.GeoDataFrame()
+
+    # ── 7. Walk route to nearest MTR ──────────────────────────────────────────
+    routes = []
+    if not stations.empty:
         try:
-            p = (geom.representative_point()
-                 if hasattr(geom, "representative_point")
-                 else geom.centroid)
-            if p.distance(site_point) < 100:
+            G = ox.graph_from_point((lat, lon), dist=MTR_FETCH_DIST,
+                                    network_type="walk")
+            origin = ox.distance.nearest_nodes(G, lon, lat)
+            for _, st in stations.iterrows():
+                ll = (gpd.GeoSeries([st["_centroid"]], crs=3857)
+                         .to_crs(4326).iloc[0])
+                dest = ox.distance.nearest_nodes(G, ll.x, ll.y)
+                path = nx.shortest_path(G, origin, dest, weight="length")
+                routes.append(ox.routing.route_to_gdf(G, path).to_crs(3857))
+        except Exception as e:
+            log.warning("Walk-route failed: %s", e)
+
+    # ── 8. Place labels ───────────────────────────────────────────────────────
+    label_tags = {
+        "amenity": True, "leisure": True,
+        "tourism": True, "shop": True,
+    }
+    try:
+        labels = ox.features_from_point(
+            (lat, lon), dist=radius_m, tags=label_tags
+        ).to_crs(3857)
+        name_col = (labels.get("name:en")
+                    if "name:en" in labels.columns
+                    else labels.get("name"))
+        labels = labels.copy()
+        labels["_label"] = name_col
+        labels = (labels.dropna(subset=["_label"])
+                         .drop_duplicates("_label").head(28))
+    except Exception:
+        labels = gpd.GeoDataFrame()
+
+    # ── 9. Draw ───────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(12, 12))
+    cx.add_basemap(ax, source=cx.providers.CartoDB.Positron,
+                   zoom=16, alpha=0.95)
+    ax.set_xlim(site_pt.x - MAP_HALF_SIZE, site_pt.x + MAP_HALF_SIZE)
+    ax.set_ylim(site_pt.y - MAP_HALF_SIZE, site_pt.y + MAP_HALF_SIZE)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+
+    # Layer polygons
+    legend_handles = []
+    for i, (layer_name, gdf) in enumerate(layers.items()):
+        if gdf.empty:
+            continue
+        colour = ("#d9d9d9" if "context" in layer_name.lower()
+                  else _LAYER_COLOURS[i % len(_LAYER_COLOURS)])
+        alpha  = 0.30 if "context" in layer_name.lower() else 0.75
+        try:
+            polys = gdf[gdf.geometry.geom_type.isin(
+                ["Polygon", "MultiPolygon"])]
+            if not polys.empty:
+                polys.plot(ax=ax, color=colour, alpha=alpha)
+                if "context" not in layer_name.lower():
+                    legend_handles.append(
+                        mpatches.Patch(color=colour, label=layer_name))
+        except Exception as e:
+            log.debug("Layer plot error [%s]: %s", layer_name, e)
+
+    # Walk routes
+    for route in routes:
+        route.plot(ax=ax, color=COLOURS["route"],
+                   linewidth=2.2, linestyle="--", zorder=8)
+
+    # Bus stops — icon or fallback dot
+    if not bus_stops.empty:
+        bus_img = _load_icon(_BUS_ICON, zoom=0.04)
+        for geom in bus_stops.geometry:
+            pt = geom if geom.geom_type == "Point" else geom.centroid
+            if bus_img:
+                _place_icon(ax, pt.x, pt.y,
+                            OffsetImage(bus_img.get_data(), zoom=0.04))
+            else:
+                ax.plot(pt.x, pt.y, "o", color="#0d47a1",
+                        markersize=7, zorder=9)
+
+    # MTR stations — logo icon or coloured polygon
+    mtr_img = _load_icon(_MTR_LOGO, zoom=0.055)
+    if not stations.empty:
+        for _, st in stations.iterrows():
+            cx_pt = st["_centroid"]
+            if mtr_img:
+                _place_icon(ax, cx_pt.x, cx_pt.y,
+                            OffsetImage(mtr_img.get_data(), zoom=0.055))
+            else:
+                # fallback: orange polygon
+                row_gdf = gpd.GeoDataFrame(
+                    geometry=[st.geometry], crs=3857)
+                row_gdf.plot(ax=ax, facecolor=COLOURS["mtr"],
+                             edgecolor="none", alpha=0.9, zorder=10)
+            # station name label
+            ax.text(cx_pt.x, cx_pt.y + 120,
+                    _wrap(st["_name"], 18),
+                    fontsize=8.5, ha="center", va="center",
+                    bbox=dict(facecolor="white", edgecolor="none",
+                              alpha=0.85, pad=1.0),
+                    zorder=12, clip_on=True)
+
+    # Site footprint
+    site_gdf.plot(ax=ax, facecolor=COLOURS["site"],
+                  edgecolor="darkred", linewidth=2, zorder=11)
+    ax.text(site_geom.centroid.x, site_geom.centroid.y,
+            "SITE", color="white", weight="bold",
+            ha="center", va="center", fontsize=9, zorder=12)
+
+    # Place labels
+    placed = []
+    offsets = [(0, 38), (0, -38), (40, 0), (-40, 0),
+               (28, 28), (-28, 28), (28, -28), (-28, -28)]
+    for i, (_, row) in enumerate(labels.iterrows()):
+        try:
+            p = row.geometry.representative_point()
+            if p.distance(site_pt) < 140:
                 continue
-            if any(p.distance(pp) < 120 for pp in placed):
+            if any(p.distance(pp) < 130 for pp in placed):
                 continue
             dx, dy = offsets[i % len(offsets)]
-            ax.text(p.x+dx, p.y+dy, _wrap(text, 18),
-                    fontsize=9, ha="center", va="center",
+            ax.text(p.x + dx, p.y + dy,
+                    _wrap(row["_label"], 18),
+                    fontsize=8.5, ha="center", va="center",
                     bbox=dict(facecolor="white", edgecolor="none",
                               alpha=0.85, boxstyle="round,pad=0.25"),
                     zorder=12, clip_on=True)
@@ -603,68 +463,37 @@ def generate_context(
         except Exception:
             continue
 
-    # zorder 17: MTR station name labels
-    if not stations_plot.empty:
-        for _, st in stations_plot.iterrows():
-            try:
-                label = _ascii(str(st.get("_name", "") or ""))
-                if not label:
-                    continue
-                ax.text(st["_cx"], st["_cy"] + 130, _wrap(label, 18),
-                        fontsize=9, weight="bold", color="black",
-                        ha="center", va="bottom",
-                        bbox=dict(facecolor="white", edgecolor="none",
-                                  alpha=0.8, pad=1.0),
-                        zorder=17)
-            except Exception as e:
-                log.debug(f"[context] stn label: {e}")
-
-    # zorder 20: Info box
-    info = (f"{data_type}: {value}\n"
-            f"OZP Plan: {zone_row['PLAN_NO']}\n"
+    # ── Info box ──────────────────────────────────────────────────────────────
+    ax.text(0.015, 0.985,
+            f"Lot: {value}\n"
+            f"OZP Plan: {plan_no}\n"
             f"Zoning: {zone}\n"
-            f"Site Type: {SITE_TYPE}")
-    if nearest_name:
-        info += f"\nNearest MTR: {nearest_name}"
-
-    ax.text(0.012, 0.988, info, transform=ax.transAxes,
+            f"Site Type: {site_type}\n",
+            transform=ax.transAxes,
             ha="left", va="top", fontsize=9.2,
-            bbox=dict(facecolor="white", edgecolor="black", pad=6),
-            zorder=20)
+            bbox=dict(facecolor="white", edgecolor="black", pad=6))
 
-    # Legend
-    ax.legend(handles=[
-        mpatches.Patch(color="#f2c6a0",         label="Residential Area"),
-        mpatches.Patch(color="#b39ddb",         label="Industrial / Commercial"),
-        mpatches.Patch(color="#b7dfb9",         label="Public Park"),
-        mpatches.Patch(color="#9ecae1",         label="School / Institution"),
-        mpatches.Patch(color="#aec6cf",         label="Hospital / Clinic"),
-        mpatches.Patch(color=hi_color, alpha=0.82, label=hi_label),
-        mpatches.Patch(color=MTR_COLOR,         label="MTR Station"),
-        mpatches.Patch(color="#e53935",         label="Site"),
-        mpatches.Patch(color=BUS_COLOR,         label="Bus Stop"),
-    ], loc="lower left", bbox_to_anchor=(0.02, 0.02),
-       fontsize=8.5, framealpha=0.95)
+    # ── Legend ────────────────────────────────────────────────────────────────
+    legend_handles += [
+        mpatches.Patch(color=COLOURS["mtr"],   label="MTR Station"),
+        mpatches.Patch(color=COLOURS["site"],  label="Site"),
+        mpatches.Patch(color=COLOURS["route"], label="Walk Route to MTR"),
+    ]
+    if not bus_stops.empty:
+        legend_handles.append(
+            mpatches.Patch(color="#0d47a1", label="Bus Stop"))
+
+    ax.legend(handles=legend_handles,
+              loc="lower left", bbox_to_anchor=(0.02, 0.08),
+              fontsize=8.5, framealpha=0.95)
 
     ax.set_title(
-        f"Automated Site Context Analysis – {data_type} {value}",
-        fontsize=15, weight="bold")
+        f"Site Context Analysis — {site_type.title()} Development",
+        fontsize=14, weight="bold")
     ax.set_axis_off()
-    ax.set_xlim(xmin, xmax); ax.set_ylim(ymin, ymax)
-    ax.autoscale(False)
 
     buf = BytesIO()
-    plt.tight_layout()
-    ax.set_position([0.02, 0.02, 0.96, 0.96])
-    plt.savefig(buf, format="png", dpi=100,
-                bbox_inches="tight", facecolor=fig.get_facecolor())
+    plt.savefig(buf, format="png", dpi=180, bbox_inches="tight")
     plt.close(fig)
-    gc.collect()
     buf.seek(0)
-
-    log.info(f"[context] Done in {_time.monotonic()-t0:.1f}s")
     return buf
-
-
-def warm_cache(ZONE_DATA: gpd.GeoDataFrame) -> None:
-    log.info("[context] warm_cache: ready (no-op)")
