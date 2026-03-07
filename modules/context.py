@@ -261,19 +261,12 @@ def generate_context(
     if lot_gdf is not None and not lot_gdf.empty:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_point = site_geom.centroid
-        # If lot is tiny (<500m²), buffer it so it's visible on map
-        if site_geom.area < 500:
-            site_render_geom = site_point.buffer(60)
-        else:
-            site_render_geom = site_geom
-        site_gdf   = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
         log.info(f"[context] lot boundary area={site_geom.area:.0f}m²")
     else:
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_render_geom = site_point.buffer(60)
-        site_geom        = site_render_geom
-        site_gdf   = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
-        log.info("[context] fallback buffer 60m")
+        site_geom  = site_point.buffer(15)
+        log.info("[context] fallback point")
+    site_render_geom = site_geom  # will be upgraded after OSM fetch
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -358,6 +351,30 @@ def generate_context(
     # Similar buildings — must be named AND reasonably large (named estate blocks)
     # Colab style: only clearly identified residential developments, not every house
     _sim_raw = _polys(results["similar"])
+
+    # ── Upgrade site polygon to nearest building footprint ────────────────────
+    # Like the Colab: find polygons within 40m of site_point, pick largest
+    site_render_geom = site_geom  # default: use lot boundary as-is
+    if not _sim_raw.empty:
+        try:
+            _nearby = _sim_raw[
+                _sim_raw.geometry.distance(site_point) < 40
+            ]
+            if not _nearby.empty:
+                _best = _nearby.assign(_a=_nearby.area).sort_values(
+                    "_a", ascending=False).geometry.iloc[0]
+                site_render_geom = _best
+                log.info(f"[context] site from OSM building area={_best.area:.0f}m²")
+            elif site_geom.area < 200:
+                # No building found nearby — use modest 20m buffer
+                site_render_geom = site_point.buffer(20)
+                log.info("[context] site: small buffer 20m")
+        except Exception as e:
+            log.debug(f"[context] site building lookup: {e}")
+    elif site_geom.area < 200:
+        site_render_geom = site_point.buffer(20)
+
+    site_gdf = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
     if not _sim_raw.empty:
         _sim_raw        = _sim_raw.copy()
         _sim_raw["_nm"] = _name(_sim_raw)
