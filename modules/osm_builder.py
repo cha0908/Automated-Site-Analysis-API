@@ -21,7 +21,7 @@ _PBF_PATH = os.path.join(_DATA_DIR, "hong-kong-latest.osm.pbf")
 _MIN_PBF_MB = 30
 
 _GPKG_FILES = {
-    "buildings": os.path.join(_DATA_DIR, "buildings.gpkg"),
+    "buildings": os.path.join(_DATA_DIR, "buildings. gpkg"),
     "landuse":   os.path.join(_DATA_DIR, "landuse.gpkg"),
     "amenities": os.path.join(_DATA_DIR, "amenities.gpkg"),
     "transport": os.path.join(_DATA_DIR, "transport.gpkg"),
