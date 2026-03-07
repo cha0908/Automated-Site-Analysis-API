@@ -26,7 +26,15 @@ import osmium
 import json
 
 OUT_DIR = os.path.join(os.path.dirname(__file__), "data", "osm")
-os.makedirs(OUT_DIR, exist_ok=True)
+from pathlib import Path
+# Robustly create output directory — handles symlinks, race conditions,
+# and cases where the path exists as a non-directory
+try:
+    Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
+except FileExistsError:
+    if not os.path.isdir(OUT_DIR):
+        os.remove(OUT_DIR)
+        Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
 
 PBF_PATH = os.path.join(OUT_DIR, "hong-kong-latest.osm.pbf")
 
@@ -282,7 +290,7 @@ def parse_and_save(handler_cls, out_path, label):
 
 def main():
     download_pbf()
-    parse_and_save(BuildingHandler, os.path.join(OUT_DIR, "buildings. gpkg"),  "buildings")
+    parse_and_save(BuildingHandler, os.path.join(OUT_DIR, "buildings.gpkg"),  "buildings")
     parse_and_save(LanduseHandler,  os.path.join(OUT_DIR, "landuse.gpkg"),    "landuse")
     parse_and_save(AmenityHandler,  os.path.join(OUT_DIR, "amenities.gpkg"),  "amenities")
     parse_and_save(TransportHandler,os.path.join(OUT_DIR, "transport.gpkg"),  "transport")
