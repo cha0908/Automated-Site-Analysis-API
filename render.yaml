@@ -2,7 +2,7 @@ services:
   - type: web
     name: automated-site-analysis-api
     runtime: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python prepare_osm_data.py
     startCommand: uvicorn app:app --host 0.0.0.0 --port 10000
     plan: free
     autoDeploy: true
