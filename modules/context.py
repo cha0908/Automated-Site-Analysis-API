@@ -2,30 +2,31 @@
 context.py — Site-Type Driven Context Analysis
 ALKF+ Module
 
-Performance contract (Render free tier):
-  - Total wall time budget: < 90 seconds
-  - OSM parallel fetch wall limit: 45 seconds per task
-  - Walk graph: built ONCE per process, cached in module-level dict
-  - Walk route computation: capped at 20 seconds via threading timeout
-  - All heavy operations wrapped in try/except — map always renders
+Performance contract (Render):
+  - Overpass fetch: tries 3 endpoints with fallback on timeout/error
+  - OSM result cache: results cached per (lat, lon, tags_hash) in memory
+  - Walk graph: cached per ~1km grid cell, built once per process
+  - Total wall time target: < 120s (typical: 30-60s with warm cache)
+  - Map always renders — every data layer has a safe empty fallback
 """
 
 import logging
 import os
 import gc
+import hashlib
+import json
 import threading
 import osmnx as ox
 import networkx as nx
 import geopandas as gpd
 import matplotlib.pyplot as plt
-import matplotlib.lines as mlines
 import matplotlib.patches as mpatches
 import contextily as cx
 import numpy as np
 import textwrap
 import pandas as pd
 
-from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED, TimeoutError as FuturesTimeout
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from typing import Optional, List
 from shapely.geometry import Point
 from io import BytesIO
@@ -35,19 +36,29 @@ from matplotlib.lines import Line2D
 
 from modules.resolver import resolve_location, get_lot_boundary
 
-# ── OSMnx settings ────────────────────────────────────────────────────────────
-ox.settings.use_cache        = True
-ox.settings.log_console      = False
-ox.settings.requests_timeout = 20   # per HTTP request, not total
-
 log = logging.getLogger(__name__)
+
+ox.settings.use_cache   = True
+ox.settings.log_console = False
+
+
+# ── Overpass endpoint fallback chain ─────────────────────────────────────────
+# If the primary endpoint throttles or times out, OSMnx automatically
+# retries the next one. We set all three so ox rotates through them.
+_OVERPASS_ENDPOINTS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+]
+ox.settings.overpass_endpoint = _OVERPASS_ENDPOINTS[0]
+ox.settings.requests_timeout  = 55   # per HTTP call — enough for throttled IP
 
 
 # ── Timing budgets ────────────────────────────────────────────────────────────
-_FETCH_WALL_TIMEOUT   = 45    # seconds — parallel OSM feature fetch
-_WALK_GRAPH_TIMEOUT   = 25    # seconds — walk graph build
-_WALK_ROUTE_TIMEOUT   = 10    # seconds — shortest path computation
-_WALK_GRAPH_DIST      = 1000  # metres — radius for walk graph
+_FETCH_WALL_TIMEOUT  = 60    # parallel fetch wall limit (seconds)
+_WALK_GRAPH_TIMEOUT  = 25    # walk graph build hard limit
+_WALK_ROUTE_TIMEOUT  = 10    # shortest path computation limit
+_WALK_GRAPH_DIST     = 1000  # metres radius for walk graph
 
 # ── Map parameters ────────────────────────────────────────────────────────────
 FETCH_RADIUS  = 700
@@ -73,11 +84,29 @@ except:
 _EMPTY = gpd.GeoDataFrame(geometry=[], crs=3857)
 
 
-# ── Walk graph cache ──────────────────────────────────────────────────────────
-# Keyed by rounded (lat, lon) to 2 decimal places (~1km grid cell).
-# Prevents re-downloading the same walk network for nearby sites.
+# ============================================================
+# MODULE-LEVEL CACHES
+# Prevent re-hitting Overpass for identical requests within
+# the same server process lifetime.
+# ============================================================
+
+# OSM feature result cache: key = (lat2dp, lon2dp, tags_hash)
+_FEATURE_CACHE: dict = {}
+_FEATURE_CACHE_LOCK  = threading.Lock()
+
+# Walk graph cache: key = (lat2dp, lon2dp)
 _WALK_GRAPH_CACHE: dict = {}
-_WALK_GRAPH_LOCK = threading.Lock()
+_WALK_GRAPH_LOCK        = threading.Lock()
+
+
+def _tags_hash(tags: dict) -> str:
+    return hashlib.md5(
+        json.dumps(tags, sort_keys=True).encode()
+    ).hexdigest()[:12]
+
+
+def _feature_cache_key(lat, lon, dist, tags):
+    return (round(lat, 2), round(lon, 2), dist, _tags_hash(tags))
 
 
 # ============================================================
@@ -163,13 +192,13 @@ SITE_CONFIGS = {
         "highlight_color": "#33a02c",
         "highlight_label": "Industrial / Warehouse Buildings",
     },
-    "OTHER": {
+    "OTHER":  {
         "primary_tags": {"building": True},
         "support_tags":  {"amenity": True},
         "highlight_color": "#aaaaaa",
         "highlight_label": "Nearby Buildings",
     },
-    "MIXED": {
+    "MIXED":  {
         "primary_tags": {"building": True},
         "support_tags":  {"amenity": True, "leisure": True},
         "highlight_color": "#aaaaaa",
@@ -186,36 +215,59 @@ def _wrap(text, width=18):
     return "\n".join(textwrap.wrap(str(text), width))
 
 
-def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
-    try:
-        gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
-        if gdf is not None and not gdf.empty:
-            return gdf.to_crs(3857)
-    except Exception as e:
-        log.debug(f"[context] fetch {list(tags.keys())[:2]}: {e}")
-    return _EMPTY.copy()
+def _fetch_one_with_fallback(lat, lon, dist, tags) -> gpd.GeoDataFrame:
+    """
+    Fetch OSM features, trying each Overpass endpoint in turn.
+    Checks module-level cache first — returns cached result instantly
+    if the same (location, dist, tags) was fetched earlier this session.
+    """
+    ck = _feature_cache_key(lat, lon, dist, tags)
+    with _FEATURE_CACHE_LOCK:
+        if ck in _FEATURE_CACHE:
+            log.info(f"[context] cache hit {_tags_hash(tags)}")
+            return _FEATURE_CACHE[ck]
+
+    result = _EMPTY.copy()
+
+    for endpoint in _OVERPASS_ENDPOINTS:
+        try:
+            ox.settings.overpass_endpoint = endpoint
+            gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
+            if gdf is not None and not gdf.empty:
+                result = gdf.to_crs(3857)
+                log.info(f"[context] fetched {len(result)} rows "
+                         f"via {endpoint.split('/')[2]}")
+            break   # success — stop trying endpoints
+        except Exception as e:
+            log.warning(f"[context] endpoint {endpoint.split('/')[2]} "
+                        f"failed: {type(e).__name__}: {e}")
+            continue
+
+    with _FEATURE_CACHE_LOCK:
+        _FEATURE_CACHE[ck] = result
+
+    return result
 
 
 def _parallel_fetch(tasks: dict) -> dict:
     """
-    Run OSM feature fetches in parallel.
-    Hard wall timeout per task = _FETCH_WALL_TIMEOUT seconds.
-    Tasks that do not complete are cancelled and return empty GDF.
+    Run OSM fetches in parallel with a hard wall timeout.
+    Tasks that exceed _FETCH_WALL_TIMEOUT return empty GDF.
     """
     results = {k: _EMPTY.copy() for k in tasks}
-    n_workers = min(len(tasks), 5)
+    n = min(len(tasks), 5)
 
-    with ThreadPoolExecutor(max_workers=n_workers) as pool:
-        futures = {pool.submit(_fetch_one, *args): key
-                   for key, args in tasks.items()}
+    with ThreadPoolExecutor(max_workers=n) as pool:
+        futures = {
+            pool.submit(_fetch_one_with_fallback, *args): key
+            for key, args in tasks.items()
+        }
         done, not_done = wait(
-            futures,
-            timeout=_FETCH_WALL_TIMEOUT,
-            return_when=ALL_COMPLETED
+            futures, timeout=_FETCH_WALL_TIMEOUT, return_when=ALL_COMPLETED
         )
         for f in not_done:
             f.cancel()
-            log.warning(f"[context] fetch timeout: {futures[f]}")
+            log.warning(f"[context] fetch wall timeout: {futures[f]}")
         for f in done:
             key = futures[f]
             try:
@@ -266,8 +318,8 @@ def _ascii_clean(text) -> Optional[str]:
 
 def _flatten_index(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     """
-    Flatten OSMnx MultiIndex (element_type, osmid) to plain integer index.
-    Preserves all attribute columns. Must be called per-GDF before concat.
+    Flatten OSMnx MultiIndex (element_type, osmid) to plain int index.
+    Must be called on each GeoDataFrame individually before concat.
     """
     if gdf.empty:
         return gdf.copy()
@@ -303,24 +355,22 @@ def _draw_mtr_icon(ax, x, y, zoom=0.035, zorder=14):
 
 
 # ============================================================
-# WALK GRAPH — cached, timeout-guarded
+# WALK GRAPH — cached + timeout-guarded
 # ============================================================
 
 def _get_walk_graph(lat: float, lon: float):
     """
-    Return cached OSMnx walk graph or build a new one.
-    Cache key = (lat rounded to 2dp, lon rounded to 2dp) ≈ 1km grid cell.
-    Graph build is run in a daemon thread with _WALK_GRAPH_TIMEOUT hard limit.
-    Returns None if build times out or fails.
+    Return cached OSMnx walk graph or build one.
+    Cache key = (round(lat,2), round(lon,2)) — ~1km grid cell.
+    Hard timeout: _WALK_GRAPH_TIMEOUT seconds.
     """
-    cache_key = (round(lat, 2), round(lon, 2))
+    ck = (round(lat, 2), round(lon, 2))
 
     with _WALK_GRAPH_LOCK:
-        if cache_key in _WALK_GRAPH_CACHE:
+        if ck in _WALK_GRAPH_CACHE:
             log.info("[context] walk graph cache hit")
-            return _WALK_GRAPH_CACHE[cache_key]
+            return _WALK_GRAPH_CACHE[ck]
 
-    # Build outside lock to avoid blocking other requests
     result = [None]
     error  = [None]
 
@@ -341,12 +391,11 @@ def _get_walk_graph(lat: float, lon: float):
     t.join(timeout=_WALK_GRAPH_TIMEOUT)
 
     if t.is_alive():
-        log.warning(f"[context] walk graph build timed out after "
-                    f"{_WALK_GRAPH_TIMEOUT}s — skipping walk route")
+        log.warning(f"[context] walk graph timed out after {_WALK_GRAPH_TIMEOUT}s")
         return None
 
-    if error[0] is not None:
-        log.warning(f"[context] walk graph build failed: {error[0]}")
+    if error[0]:
+        log.warning(f"[context] walk graph error: {error[0]}")
         return None
 
     G = result[0]
@@ -354,22 +403,17 @@ def _get_walk_graph(lat: float, lon: float):
         return None
 
     with _WALK_GRAPH_LOCK:
-        _WALK_GRAPH_CACHE[cache_key] = G
+        _WALK_GRAPH_CACHE[ck] = G
 
     log.info(f"[context] walk graph built: "
-             f"{G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
+             f"{G.number_of_nodes()} nodes / {G.number_of_edges()} edges")
     return G
 
 
-def _compute_walk_route(
-    lat: float,
-    lon: float,
-    station_wgs84: Point
-) -> Optional[gpd.GeoDataFrame]:
+def _compute_walk_route(lat, lon, station_wgs84: Point):
     """
     Compute pedestrian path site → MTR station.
-    Uses cached walk graph. Returns EPSG:3857 GDF or None.
-    Shortest path computation capped at _WALK_ROUTE_TIMEOUT seconds.
+    Returns EPSG:3857 GeoDataFrame or None.
     """
     G = _get_walk_graph(lat, lon)
     if G is None:
@@ -383,30 +427,28 @@ def _compute_walk_route(
         if site_node == stn_node:
             return None
     except Exception as e:
-        log.warning(f"[context] node snap failed: {e}")
+        log.warning(f"[context] node snap: {e}")
         return None
 
-    # Cap shortest path computation
     route_result = [None]
     route_error  = [None]
 
-    def _find_path():
+    def _find():
         try:
             path = nx.shortest_path(G, site_node, stn_node, weight="length")
             route_result[0] = ox.routing.route_to_gdf(G, path).to_crs(3857)
         except Exception as e:
             route_error[0] = e
 
-    t = threading.Thread(target=_find_path, daemon=True)
+    t = threading.Thread(target=_find, daemon=True)
     t.start()
     t.join(timeout=_WALK_ROUTE_TIMEOUT)
 
     if t.is_alive():
-        log.warning(f"[context] route computation timed out")
+        log.warning("[context] walk route timed out")
         return None
-
-    if route_error[0] is not None:
-        log.warning(f"[context] route failed: {route_error[0]}")
+    if route_error[0]:
+        log.warning(f"[context] walk route: {route_error[0]}")
         return None
 
     return route_result[0]
@@ -439,14 +481,14 @@ def generate_context(
     try:
         lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
     except Exception as e:
-        log.warning(f"[context] get_lot_boundary: {e}")
+        log.warning(f"[context] lot boundary: {e}")
         lot_gdf = None
 
     if lot_gdf is not None and not lot_gdf.empty:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
         site_point = site_geom.centroid
-        log.info(f"[context] lot boundary: area={site_geom.area:.0f}m²")
+        log.info(f"[context] lot boundary area={site_geom.area:.0f}m²")
     else:
         site_point = gpd.GeoSeries(
             [Point(lon, lat)], crs=4326
@@ -455,7 +497,7 @@ def generate_context(
         site_gdf  = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
         log.info("[context] using 80m buffer fallback")
 
-    # ── Zoning lookup ─────────────────────────────────────────────────────────
+    # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
     primary = ozp[ozp.contains(site_point)]
     if primary.empty:
@@ -468,12 +510,14 @@ def generate_context(
     hi_label  = cfg["highlight_label"]
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
-    # ── Parallel OSM fetches ──────────────────────────────────────────────────
-    # NOTE: support_tags fetch is merged INTO primary_tags fetch to halve
-    # the number of Overpass API calls. This prevents the support timeout
-    # that crashed the previous version (support was the slowest task).
+    # ── Parallel OSM fetch ────────────────────────────────────────────────────
+    # Each task uses _fetch_one_with_fallback which:
+    #   1. Returns from module cache if previously fetched
+    #   2. Tries primary Overpass endpoint
+    #   3. Falls back to kumi.systems if primary fails/times out
+    #   4. Falls back to mail.ru endpoint as last resort
     # ─────────────────────────────────────────────────────────────────────────
-    log.info("[context] Fetching OSM data in parallel...")
+    log.info("[context] Fetching OSM data...")
 
     fetch_tasks = {
         "landuse":  (lat, lon, fetch_r, {
@@ -490,21 +534,19 @@ def generate_context(
     gc.collect()
 
     # ── Derive layers ─────────────────────────────────────────────────────────
-
     landuse_raw      = results["landuse"]
     residential_area = _filter_col(landuse_raw, "landuse", "residential")
     industrial_area  = _filter_col(landuse_raw, "landuse",
                                    ["industrial", "commercial"])
     parks            = _filter_col(landuse_raw, "leisure",
-                                   ["park", "garden", "recreation_ground",
-                                    "playground"])
+                                   ["park", "garden",
+                                    "recreation_ground", "playground"])
 
     support_raw = results["support"]
     schools     = _filter_col(support_raw, "amenity",
                               ["school", "college", "university", "kindergarten"])
     hospitals   = _filter_col(support_raw, "amenity", ["hospital", "clinic"])
 
-    # Primary type-specific buildings — polygons, named or >= 300m²
     primary_raw = _flatten_index(results["primary"])
     primary_bld = _polys_only(primary_raw)
     if not primary_bld.empty:
@@ -516,7 +558,7 @@ def generate_context(
         primary_bld = primary_bld[named_mask | large_mask].copy()
     log.info(f"[context] primary buildings: {len(primary_bld)}")
 
-    # Bus stops — point geometry only, clustered to max 6
+    # Bus stops
     bus_raw   = _flatten_index(results["bus"])
     bus_stops = bus_raw[
         bus_raw.geometry.geom_type == "Point"
@@ -534,10 +576,10 @@ def generate_context(
         except Exception:
             bus_stops = bus_stops.head(6)
 
-    # ── MTR station processing ────────────────────────────────────────────────
+    # MTR stations
     stations_raw     = _flatten_index(results["stations"])
     stations_in_view = _EMPTY.copy()
-    nearest_station  = None   # WGS84 Point for walk routing
+    nearest_station  = None
     nearest_stn_name = None
 
     if not stations_raw.empty:
@@ -549,7 +591,6 @@ def generate_context(
             lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1
         )
         s = s.dropna(subset=["_name"]).sort_values("_dist")
-
         stations_in_view = s[s["_dist"] <= half_size * 1.5].copy()
 
         if not stations_in_view.empty:
@@ -559,17 +600,15 @@ def generate_context(
             ).to_crs(4326).iloc[0]
             nearest_stn_name = _ascii_clean(str(best["_name"]))
 
-    # ── Walk route ────────────────────────────────────────────────────────────
-    # Runs AFTER OSM fetch completes. Uses cached graph — first call downloads,
-    # subsequent calls for nearby sites return instantly from cache.
+    # Walk route
     walk_route_gdf = None
     if show_walk_route and nearest_station is not None:
         log.info(f"[context] Walk route → {nearest_stn_name}...")
         walk_route_gdf = _compute_walk_route(lat, lon, nearest_station)
-        if walk_route_gdf is None:
-            log.info("[context] Walk route unavailable — map renders without it")
+        status = f"{len(walk_route_gdf)} segs" if walk_route_gdf is not None else "unavailable"
+        log.info(f"[context] walk route: {status}")
 
-    # ── Place labels ──────────────────────────────────────────────────────────
+    # Labels
     label_items = []
     seen_texts  = set()
 
@@ -632,12 +671,11 @@ def generate_context(
         except Exception as e:
             log.warning(f"[context] basemap: {e}")
 
-    # Re-lock — contextily may reset limits
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.autoscale(False)
 
-    # ── Land-use base layers ──────────────────────────────────────────────────
+    # ── Layers ───────────────────────────────────────────────────────────────
     _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks,            ax, color="#b7dfb9", alpha=0.90, zorder=2)
@@ -646,35 +684,24 @@ def generate_context(
     del residential_area, industrial_area, parks, schools, hospitals
     gc.collect()
 
-    # ── Primary type-specific buildings ──────────────────────────────────────
     _safe_plot(primary_bld, ax, color=hi_color, alpha=0.82, zorder=3)
     del primary_bld
     gc.collect()
 
-    # ── Pedestrian walk route — dashed blue ───────────────────────────────────
+    # Walk route
     legend_walk = None
     if walk_route_gdf is not None and not walk_route_gdf.empty:
         try:
-            walk_route_gdf.plot(
-                ax=ax,
-                color=ROUTE_COLOR,
-                linewidth=2.8,
-                linestyle=(0, (6, 4)),
-                zorder=6,
-                alpha=0.90
-            )
-            legend_walk = Line2D(
-                [], [],
-                color=ROUTE_COLOR,
-                linewidth=2.8,
-                linestyle=(0, (6, 4)),
-                label="Pedestrian Route to MTR"
-            )
-            log.info(f"[context] walk route: {len(walk_route_gdf)} segments")
+            walk_route_gdf.plot(ax=ax, color=ROUTE_COLOR,
+                                linewidth=2.8, linestyle=(0, (6, 4)),
+                                zorder=6, alpha=0.90)
+            legend_walk = Line2D([], [], color=ROUTE_COLOR, linewidth=2.8,
+                                 linestyle=(0, (6, 4)),
+                                 label="Pedestrian Route to MTR")
         except Exception as e:
             log.warning(f"[context] walk route plot: {e}")
 
-    # ── Bus stops ─────────────────────────────────────────────────────────────
+    # Bus stops
     if not bus_stops.empty:
         try:
             if _bus_icon is not None:
@@ -695,30 +722,28 @@ def generate_context(
     del bus_stops
     gc.collect()
 
-    # ── MTR stations ──────────────────────────────────────────────────────────
+    # MTR stations
     if not stations_in_view.empty:
         try:
             _safe_plot(stations_in_view, ax,
                        facecolor=MTR_COLOR, edgecolor="none",
                        alpha=0.90, zorder=10)
             for _, st in stations_in_view.iterrows():
-                _draw_mtr_icon(ax, st["_cx"], st["_cy"],
-                               zoom=0.035, zorder=14)
+                _draw_mtr_icon(ax, st["_cx"], st["_cy"], zoom=0.035, zorder=14)
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── Site ──────────────────────────────────────────────────────────────────
+    # Site
     try:
         sc = site_geom.centroid
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="white",
                       linewidth=2.5, zorder=15)
-        ax.text(sc.x, sc.y, "SITE",
-                color="white", weight="bold", fontsize=8,
-                ha="center", va="center", zorder=16)
+        ax.text(sc.x, sc.y, "SITE", color="white", weight="bold",
+                fontsize=8, ha="center", va="center", zorder=16)
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
-    # ── Place labels ──────────────────────────────────────────────────────────
+    # Place labels
     placed  = []
     offsets = [(0, 50), (0, -50), (55, 0), (-55, 0),
                (38, 38), (-38, 38), (38, -38), (-38, -38)]
@@ -732,38 +757,32 @@ def generate_context(
             if any(p.distance(pp) < 90 for pp in placed):
                 continue
             dx, dy = offsets[i % len(offsets)]
-            ax.text(
-                p.x + dx, p.y + dy,
-                _wrap(text, 18),
-                fontsize=8.5, ha="center", va="center",
-                bbox=dict(facecolor="white", edgecolor="none",
-                          alpha=0.85, boxstyle="round,pad=0.3"),
-                zorder=13, clip_on=True
-            )
+            ax.text(p.x + dx, p.y + dy, _wrap(text, 18),
+                    fontsize=8.5, ha="center", va="center",
+                    bbox=dict(facecolor="white", edgecolor="none",
+                              alpha=0.85, boxstyle="round,pad=0.3"),
+                    zorder=13, clip_on=True)
             placed.append(p)
         except Exception:
             continue
 
-    # ── Station name labels ───────────────────────────────────────────────────
+    # Station labels
     if not stations_in_view.empty:
         try:
             for _, st in stations_in_view.iterrows():
                 label = _ascii_clean(str(st.get("_name", "")))
                 if not label:
                     continue
-                ax.text(
-                    st["_cx"], st["_cy"] + 150,
-                    _wrap(label, 18),
-                    fontsize=9, weight="bold", color="black",
-                    ha="center", va="bottom",
-                    bbox=dict(facecolor="white", edgecolor="none",
-                              alpha=0.88, pad=2.5),
-                    zorder=17
-                )
+                ax.text(st["_cx"], st["_cy"] + 150, _wrap(label, 18),
+                        fontsize=9, weight="bold", color="black",
+                        ha="center", va="bottom",
+                        bbox=dict(facecolor="white", edgecolor="none",
+                                  alpha=0.88, pad=2.5),
+                        zorder=17)
         except Exception as e:
             log.debug(f"[context] station labels: {e}")
 
-    # ── Info box ──────────────────────────────────────────────────────────────
+    # Info box
     info_lines = [
         f"{data_type}: {value}",
         f"OZP Plan: {primary['PLAN_NO']}",
@@ -773,47 +792,34 @@ def generate_context(
     if nearest_stn_name:
         info_lines.append(f"Nearest MTR: {nearest_stn_name}")
 
-    ax.text(
-        0.012, 0.988,
-        "\n".join(info_lines),
-        transform=ax.transAxes,
-        ha="left", va="top", fontsize=9,
-        bbox=dict(facecolor="white", edgecolor="black",
-                  linewidth=1.5, pad=6),
-        zorder=20,
-    )
+    ax.text(0.012, 0.988, "\n".join(info_lines),
+            transform=ax.transAxes, ha="left", va="top", fontsize=9,
+            bbox=dict(facecolor="white", edgecolor="black",
+                      linewidth=1.5, pad=6),
+            zorder=20)
 
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # Legend
     legend_handles = [
-        mpatches.Patch(color="#f2c6a0",        label="Residential Area"),
-        mpatches.Patch(color="#b39ddb",        label="Industrial / Commercial Area"),
-        mpatches.Patch(color="#b7dfb9",        label="Public Park"),
-        mpatches.Patch(color="#9ecae1",        label="School / Institution"),
-        mpatches.Patch(color="#aec6cf",        label="Hospital"),
+        mpatches.Patch(color="#f2c6a0",           label="Residential Area"),
+        mpatches.Patch(color="#b39ddb",           label="Industrial / Commercial Area"),
+        mpatches.Patch(color="#b7dfb9",           label="Public Park"),
+        mpatches.Patch(color="#9ecae1",           label="School / Institution"),
+        mpatches.Patch(color="#aec6cf",           label="Hospital"),
         mpatches.Patch(color=hi_color, alpha=0.82, label=hi_label),
-        mpatches.Patch(color=MTR_COLOR,        label="MTR Station"),
-        mpatches.Patch(color="#e53935",        label="Site"),
-        mpatches.Patch(color="#0d47a1",        label="Bus Stop"),
+        mpatches.Patch(color=MTR_COLOR,           label="MTR Station"),
+        mpatches.Patch(color="#e53935",           label="Site"),
+        mpatches.Patch(color="#0d47a1",           label="Bus Stop"),
     ]
     if legend_walk is not None:
         legend_handles.append(legend_walk)
 
-    ax.legend(
-        handles=legend_handles,
-        loc="lower left",
-        bbox_to_anchor=(0.02, 0.02),
-        fontsize=8.5,
-        framealpha=0.95,
-        edgecolor="black",
-    )
+    ax.legend(handles=legend_handles, loc="lower left",
+              bbox_to_anchor=(0.02, 0.02),
+              fontsize=8.5, framealpha=0.95, edgecolor="black")
 
-    ax.set_title(
-        f"Automated Site Context Analysis – {data_type} {value}",
-        fontsize=15, weight="bold",
-    )
+    ax.set_title(f"Automated Site Context Analysis – {data_type} {value}",
+                 fontsize=15, weight="bold")
     ax.set_axis_off()
-
-    # Final extent lock
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.autoscale(False)
