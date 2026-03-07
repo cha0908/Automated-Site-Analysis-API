@@ -937,31 +937,44 @@ _WARM_TAGS = [
 
 def warm_cache(ZONE_DATA: gpd.GeoDataFrame) -> None:
     """
-    Pre-warm OSM feature cache for common HK sites using bbox queries.
-    Runs in background executor thread — never blocks startup.
+    Pre-warm OSM feature cache sequentially with 2s delay between requests.
+    Runs entirely in a single background daemon thread — never blocks startup.
+    Sequential (not parallel) to avoid hammering a throttled Overpass IP.
+    Only fetches the two most impactful tag sets: landuse and stations.
+    Primary/support/bus are left for on-demand fetch since they are site-specific.
     """
-    log.info("[context] cache warmer started (bbox mode)")
+    import time as _t
 
-    for lat, lon, label in _WARM_SITES:
-        bbox_small = _bbox_from_point(lat, lon, FETCH_RADIUS)
-        bbox_large = _bbox_from_point(lat, lon, 1500)
+    # Only pre-warm the two fast, generic tag sets
+    WARM_TAGS_FAST = [
+        {"landuse": True,
+         "leisure": ["park", "playground", "garden", "recreation_ground"]},
+        {"railway": "station"},
+    ]
 
-        for tags in _WARM_TAGS:
-            bbox = bbox_large if "railway" in tags else bbox_small
-            north, south, east, west = bbox
-            ck = (round((north+south)/2, 2), round((east+west)/2, 2),
-                  round(north-south, 4), _tags_hash(tags))
+    def _run():
+        log.info("[context] cache warmer started (sequential, 2s delay)")
+        for lat, lon, label in _WARM_SITES:
+            for tags in WARM_TAGS_FAST:
+                bbox = _bbox_from_point(
+                    lat, lon,
+                    1500 if "railway" in tags else FETCH_RADIUS
+                )
+                north, south, east, west = bbox
+                ck = (round((north+south)/2, 2), round((east+west)/2, 2),
+                      round(north-south, 4), _tags_hash(tags))
 
-            with _FEATURE_CACHE_LOCK:
-                if ck in _FEATURE_CACHE:
-                    continue
+                with _FEATURE_CACHE_LOCK:
+                    if ck in _FEATURE_CACHE:
+                        continue
 
-            def _warm(b=bbox, t=tags, n=f"{label}"):
                 try:
-                    _fetch_bbox(b, t, name=f"warm:{n}")
+                    _fetch_bbox(bbox, tags, name=f"warm:{label}")
                 except Exception as e:
-                    log.debug(f"[context] warmer {n}: {e}")
+                    log.debug(f"[context] warmer {label}: {e}")
 
-            threading.Thread(target=_warm, daemon=True).start()
+                _t.sleep(2)   # 2s between requests — avoids Overpass rate limit
 
-    log.info("[context] cache warmer: all threads dispatched")
+        log.info("[context] cache warmer complete")
+
+    threading.Thread(target=_run, daemon=True).start()
