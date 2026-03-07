@@ -18,7 +18,6 @@ import matplotlib.patches as mpatches
 import numpy as np
 import textwrap
 import pandas as pd
-import networkx as nx
 from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 from typing import Optional
 from shapely.geometry import Point, LineString
@@ -231,30 +230,6 @@ def _draw_mtr(ax, x, y, zoom=0.035, zorder=14):
                 markeredgecolor="white", markeredgewidth=2, zorder=zorder)
 
 
-def _walk_route(lat, lon, stn_lon, stn_lat, timeout=22) -> Optional[gpd.GeoDataFrame]:
-    """Compute real shortest-path walk route — thread-based timeout safe on Render."""
-    import concurrent.futures as cf
-
-    def _compute():
-        G = ox.graph_from_point((lat, lon), dist=1500, network_type="walk",
-                                simplify=True)
-        site_node = ox.distance.nearest_nodes(G, lon, lat)
-        stn_node  = ox.distance.nearest_nodes(G, stn_lon, stn_lat)
-        path      = nx.shortest_path(G, site_node, stn_node, weight="length")
-        return ox.routing.route_to_gdf(G, path).to_crs(3857)
-
-    try:
-        with cf.ThreadPoolExecutor(max_workers=1) as ex:
-            fut = ex.submit(_compute)
-            result = fut.result(timeout=timeout)
-            log.info(f"[context] walk route: {len(result)} segments")
-            return result
-    except cf.TimeoutError:
-        log.warning(f"[context] walk graph timed out after {timeout}s")
-        return None
-    except Exception as e:
-        log.warning(f"[context] walk route failed: {e}")
-        return None
 
 
 # ── Main generator ────────────────────────────────────────────────────────────
@@ -316,11 +291,6 @@ def generate_context(
 
     # ── Parallel OSM fetch + walk graph (5 tasks concurrently) ──────────────
     log.info("[context] Fetching OSM data + walk graph in parallel (120s)...")
-    import concurrent.futures as cf
-
-    # Start walk graph immediately in background
-    _walk_executor = cf.ThreadPoolExecutor(max_workers=1)
-    _walk_future   = None  # will be set once we know the station location
 
     results = _parallel_fetch({
         "base": (lat, lon, max(fetch_r, 1200), {
@@ -417,20 +387,6 @@ def generate_context(
             bus_stops = bus_stops.head(6)
     log.info(f"[context] bus stops: {len(bus_stops)}")
 
-    # ── Launch walk graph now that we know the station ────────────────────────
-    # This runs concurrently with label processing / data prep
-    _walk_future = None
-    if nearest_stn is not None:
-        try:
-            stn_pt_4326 = gpd.GeoSeries(
-                [nearest_stn["_centroid"]], crs=3857).to_crs(4326).iloc[0]
-            _stn_lon = stn_pt_4326.x
-            _stn_lat = stn_pt_4326.y
-            _walk_future = _walk_executor.submit(
-                _walk_route, lat, lon, _stn_lon, _stn_lat, 25)
-            log.info("[context] walk graph launched in background")
-        except Exception as e:
-            log.warning(f"[context] walk graph launch: {e}")
 
     # ── Place labels ──────────────────────────────────────────────────────────
     labels_raw      = results["labels"]
@@ -462,19 +418,8 @@ def generate_context(
     del base, results, labels_raw, support_raw
     gc.collect()
 
-    # ── Collect walk route result (was computing in background) ──────────────
-    route_gdf = None  # always initialize first
-    if _walk_future is not None:
-        try:
-            route_gdf = _walk_future.result(timeout=5)
-        except Exception as e:
-            log.warning(f"[context] walk collect: {e}")
-            route_gdf = None
-    try:
-        _walk_executor.shutdown(wait=False)
-    except Exception:
-        pass
-    log.info(f"[context] walk={'yes' if route_gdf is not None else 'no (fallback)'}")
+    route_gdf = None  # walk graph removed — straight line fallback only
+    log.info("[context] Rendering...")
 
     # ═══════════════════════════════════════════════════════════════════════════
     # RENDER
