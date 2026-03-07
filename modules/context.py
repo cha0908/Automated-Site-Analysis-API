@@ -290,7 +290,8 @@ def generate_context(
     # similar  = type-specific similar buildings
     # support  = type-specific supporting amenities
     # stations = MTR stations
-    log.info("[context] Fetching 4 tasks in parallel (120s limit)...")
+    # streets  = walkable highway edges for route drawing
+    log.info("[context] Fetching 5 tasks in parallel (120s limit)...")
     results = _parallel_fetch({
         "base": (lat, lon, fetch_r, {
             "landuse": True,
@@ -301,6 +302,11 @@ def generate_context(
         "similar":  (lat, lon, fetch_r, sim_tags),
         "support":  (lat, lon, fetch_r, sup_tags),
         "stations": (lat, lon, 1200,    {"railway": "station"}),
+        "streets":  (lat, lon, fetch_r, {
+            "highway": ["primary", "secondary", "tertiary",
+                        "residential", "footway", "pedestrian",
+                        "path", "steps", "living_street"],
+        }),
     }, wall_timeout=120)
     gc.collect()
 
@@ -359,7 +365,51 @@ def generate_context(
             raw_name = stn.iloc[0]["name"]
             nearest_stn_name = _ascii_only(str(raw_name)) if raw_name else None
 
-    # ── Cluster bus stops to max 6 ────────────────────────────────────────────
+    # ── Walk route along streets to nearest MTR ───────────────────────────────
+    walk_route_line = None
+    streets_gdf     = results.get("streets", _EMPTY.copy())
+
+    if not stations_in_view.empty and not streets_gdf.empty:
+        try:
+            from shapely.geometry import LineString, MultiLineString
+            from shapely.ops import nearest_points, unary_union, linemerge
+
+            nearest_stn     = stations_in_view.iloc[0]
+            nearest_stn_pt  = nearest_stn.geometry.centroid
+
+            # Keep only LineString edges
+            edges = streets_gdf[streets_gdf.geometry.geom_type.isin(
+                ["LineString", "MultiLineString"])].copy()
+
+            if not edges.empty:
+                # Build a corridor between site and station (buffer of straight line)
+                corridor = LineString([
+                    (site_point.x, site_point.y),
+                    (nearest_stn_pt.x, nearest_stn_pt.y)
+                ]).buffer(200)  # 200m corridor either side
+
+                # Clip edges to corridor
+                corridor_edges = edges[edges.geometry.intersects(corridor)]
+
+                if not corridor_edges.empty:
+                    # Merge into continuous lines and pick the longest
+                    merged = linemerge(
+                        unary_union(corridor_edges.geometry.values))
+                    if merged.geom_type == "LineString":
+                        walk_route_line = merged
+                    elif merged.geom_type == "MultiLineString":
+                        # Pick the line that connects closest to both endpoints
+                        best = max(merged.geoms, key=lambda g: g.length)
+                        walk_route_line = best
+
+            log.info(f"[context] walk route: "
+                     f"{'line len=' + str(int(walk_route_line.length)) + 'm' if walk_route_line else 'unavailable'}")
+        except Exception as e:
+            log.warning(f"[context] walk route error: {e}")
+            walk_route_line = None
+
+    del streets_gdf
+    gc.collect()
     bus_stops = bus_stops_raw.copy()
     if len(bus_stops) > 6:
         try:
@@ -442,8 +492,10 @@ def generate_context(
     gc.collect()
 
     # ── Type-specific layers (zorder 3-4) ─────────────────────────────────────
-    _safe_plot(support_blds, ax, color=sp_color, alpha=0.60, zorder=3)
-    _safe_plot(similar_blds, ax, color=hi_color,  alpha=0.80, zorder=4)
+    # Support buildings faded; similar buildings prominent
+    _safe_plot(support_blds, ax, color=sp_color, alpha=0.45, zorder=3)
+    _safe_plot(similar_blds, ax, color=hi_color,  alpha=0.85, zorder=4,
+               edgecolor="white", linewidth=0.3)
 
     del support_blds, similar_blds
     gc.collect()
@@ -461,33 +513,37 @@ def generate_context(
     except Exception as e:
         log.debug(f"[context] catchment: {e}")
 
-    # ── Straight-line connector to nearest MTR (zorder 6) ────────────────────
+    # ── Walk route to nearest MTR (zorder 6) ─────────────────────────────────
     if not stations_in_view.empty:
         try:
-            nearest = stations_in_view.iloc[0]
-            nc      = nearest.geometry.centroid
-            ax.annotate("",
-                xy=(nc.x, nc.y), xytext=(site_point.x, site_point.y),
-                arrowprops=dict(
-                    arrowstyle="-",
-                    color="#005eff",
-                    lw=2.0,
-                    linestyle="dashed",
-                    connectionstyle="arc3,rad=0.0",
-                ),
-                zorder=6,
-            )
-            # Distance label on midpoint
-            mid_x = (site_point.x + nc.x) / 2
-            mid_y = (site_point.y + nc.y) / 2
-            dist_m = int(site_point.distance(nc))
-            ax.text(mid_x, mid_y, f"~{dist_m}m walk",
+            nearest_stn_pt = stations_in_view.iloc[0].geometry.centroid
+            dist_m         = int(site_point.distance(nearest_stn_pt))
+
+            if walk_route_line is not None:
+                # Draw the real street-following route
+                route_gdf = gpd.GeoDataFrame(
+                    geometry=[walk_route_line], crs=3857)
+                route_gdf.plot(ax=ax, color="#005eff", linewidth=2.5,
+                               linestyle="--", alpha=0.85, zorder=6)
+            else:
+                # Fallback: straight dashed line
+                ax.annotate("",
+                    xy=(nearest_stn_pt.x, nearest_stn_pt.y),
+                    xytext=(site_point.x, site_point.y),
+                    arrowprops=dict(arrowstyle="-", color="#005eff",
+                                   lw=2.0, linestyle="dashed"),
+                    zorder=6)
+
+            # Distance label at midpoint
+            mid_x = (site_point.x + nearest_stn_pt.x) / 2
+            mid_y = (site_point.y + nearest_stn_pt.y) / 2
+            ax.text(mid_x, mid_y, f"~{dist_m}m",
                     fontsize=7.5, color="#005eff", ha="center", va="bottom",
                     bbox=dict(facecolor="white", edgecolor="none",
                               alpha=0.75, pad=1),
-                    zorder=6)
+                    zorder=7)
         except Exception as e:
-            log.debug(f"[context] walk line: {e}")
+            log.debug(f"[context] walk line render: {e}")
 
     # ── Bus stops (zorder 9) ──────────────────────────────────────────────────
     if not bus_stops.empty:
@@ -524,7 +580,11 @@ def generate_context(
 
     # ── Site (zorder 15-16) ───────────────────────────────────────────────────
     try:
-        site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="white",
+        # Outer glow border
+        site_gdf.plot(ax=ax, facecolor="none", edgecolor="white",
+                      linewidth=6.0, zorder=14)
+        # Red fill with dark border
+        site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="#b71c1c",
                       linewidth=2.5, zorder=15)
         sc = site_geom.centroid
         ax.text(sc.x, sc.y, "SITE", color="white", weight="bold",
