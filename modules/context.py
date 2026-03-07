@@ -146,21 +146,10 @@ _HIGHLIGHT = {
 def _fetch_osm(lat: float, lon: float,
                dist: float, tags: dict) -> gpd.GeoDataFrame:
     """
-    Fetch OSM features via features_from_bbox.
-    ox.settings.overpass_endpoint is set per-call in a lock to avoid
-    race conditions between parallel threads.
+    Wrapper: use direct HTTP fetch (hard timeout) for polygon-heavy queries,
+    fall back to OSMnx for small point queries if direct fails.
     """
-    bbox = ox.utils_geo.bbox_from_point((lat, lon), dist=dist)
-    for ep in _OVERPASS_ENDPOINTS:
-        try:
-            ox.settings.overpass_endpoint = ep
-            gdf = ox.features_from_bbox(bbox, tags=tags)
-            if gdf is not None and not gdf.empty:
-                return gdf.to_crs(3857)
-        except Exception as e:
-            log.debug(f"[context] {ep.split('/')[2]}: {type(e).__name__}")
-            continue
-    return _EMPTY.copy()
+    return _fetch_osm_direct(lat, lon, dist, tags)
 
 
 # ============================================================
@@ -325,26 +314,30 @@ def generate_context(
         _bus_result[0] = r
         log.info(f"[context] bus raw: {len(r)} rows")
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        futs = {
-            pool.submit(_fetch_polygons): "polygons",
-            pool.submit(_fetch_stations): "stations",
-            pool.submit(_fetch_bus):      "bus",
-        }
-        # Per-future timeout — any single fetch capped at 25s
-        # prevents one slow query from blocking the entire pipeline
-        import concurrent.futures as _cf
-        done, pending = _cf.wait(futs, timeout=28,  # 20s server timeout + 8s buffer
-                                 return_when=_cf.ALL_COMPLETED)
-        for f in pending:
-            fname = futs[f]
-            log.warning(f"[context] {fname} fetch timed out — skipping")
-            f.cancel()
-        for f in done:
-            try:
-                f.result()
-            except Exception as e:
-                log.warning(f"[context] fetch error ({futs[f]}): {e}")
+    # Submit fetches to a NON-context-manager executor.
+    # CRITICAL: do NOT use "with ThreadPoolExecutor" here.
+    # ThreadPoolExecutor.__exit__ calls shutdown(wait=True) which joins
+    # ALL threads — including zombie threads that ignored f.cancel().
+    # Instead: call shutdown(wait=False) after cf.wait() so the main thread
+    # is never held hostage by a slow Overpass polygon fetch.
+    import concurrent.futures as _cf
+    _pool = ThreadPoolExecutor(max_workers=3)
+    futs = {
+        _pool.submit(_fetch_polygons): "polygons",
+        _pool.submit(_fetch_stations): "stations",
+        _pool.submit(_fetch_bus):      "bus",
+    }
+    done, pending = _cf.wait(futs, timeout=28,
+                             return_when=_cf.ALL_COMPLETED)
+    for f in pending:
+        log.warning(f"[context] {futs[f]} fetch timed out — skipping")
+    for f in done:
+        try:
+            f.result()
+        except Exception as e:
+            log.warning(f"[context] fetch error ({futs[f]}): {e}")
+    _pool.shutdown(wait=False)  # release pool; zombie threads run to completion
+                                # in the background but main thread is NOT blocked
 
     log.info(f"[context] all fetches done in "
              f"{_time.monotonic()-t_fetch:.1f}s")
