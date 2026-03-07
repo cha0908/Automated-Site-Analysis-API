@@ -29,7 +29,7 @@ from modules.resolver import resolve_location, get_lot_boundary
 
 ox.settings.use_cache        = True
 ox.settings.log_console      = False
-ox.settings.requests_timeout = 25
+ox.settings.requests_timeout = 18  # fallback only — direct fetch uses requests timeout
 
 log = logging.getLogger(__name__)
 
@@ -146,6 +146,9 @@ def wrap_label(text, width=18):
     return "\n".join(textwrap.wrap(str(text), width))
 
 
+import requests as _requests
+from shapely.geometry import shape as _shape, mapping as _mapping
+
 # Overpass endpoints — tried in order on failure
 _OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -153,33 +156,137 @@ _OVERPASS_ENDPOINTS = [
     "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
+# Hard timeout for each individual HTTP request to Overpass
+# Must be short enough that 4 parallel calls finish before health check
+_FETCH_TIMEOUT = 18   # seconds per HTTP request
+_OVERPASS_SERVER_TIMEOUT = 16  # [timeout:N] in the QL query
+
 
 def _bbox_from_point(lat: float, lon: float, dist: float) -> tuple:
     """Return (north, south, east, west) bbox in WGS84."""
     return ox.utils_geo.bbox_from_point((lat, lon), dist=dist)
 
 
+def _tags_to_overpass_filters(tags: dict, bbox_str: str) -> str:
+    """Convert an OSMnx-style tags dict to Overpass QL filter lines."""
+    lines = []
+    for key, val in tags.items():
+        if val is True:
+            # Any value — match key existence
+            lines.append(f'  way["{key}"]({bbox_str});')
+            lines.append(f'  relation["{key}"]({bbox_str});')
+            lines.append(f'  node["{key}"]({bbox_str});')
+        elif isinstance(val, list):
+            joined = "|".join(val)
+            lines.append(f'  way["{key}"~"^({joined})$"]({bbox_str});')
+            lines.append(f'  relation["{key}"~"^({joined})$"]({bbox_str});')
+            lines.append(f'  node["{key}"~"^({joined})$"]({bbox_str});')
+        else:
+            lines.append(f'  way["{key}"="{val}"]({bbox_str});')
+            lines.append(f'  relation["{key}"="{val}"]({bbox_str});')
+            lines.append(f'  node["{key}"="{val}"]({bbox_str});')
+    return "\n".join(lines)
+
+
+def _overpass_json_to_gdf(data: dict) -> gpd.GeoDataFrame:
+    """
+    Convert raw Overpass JSON response to GeoDataFrame.
+    Handles nodes (points), ways (polygons/lines), relations (multipolygons).
+    Uses OSMnx to do the heavy lifting via its internal response parser.
+    Falls back to manual parsing if OSMnx parser unavailable.
+    """
+    try:
+        # OSMnx 2.x internal parser — most reliable
+        from osmnx._overpass import _parse_nodes_coords, _consolidate_subdivide_geometry
+        gdf = ox.features._parse_feature_cols(
+            ox.features._create_gdf(data)
+        )
+        if gdf is not None and not gdf.empty:
+            return gdf
+    except Exception:
+        pass
+
+    # Manual fallback: build simple point GDF from nodes only
+    features = []
+    node_coords = {el["id"]: (el["lon"], el["lat"])
+                   for el in data.get("elements", [])
+                   if el["type"] == "node" and "lon" in el}
+
+    for el in data.get("elements", []):
+        tags = el.get("tags", {})
+        if not tags:
+            continue
+        geom = None
+        if el["type"] == "node" and "lon" in el:
+            geom = Point(el["lon"], el["lat"])
+        elif el["type"] == "way":
+            coords = [node_coords.get(nid) for nid in el.get("nodes", [])
+                      if nid in node_coords]
+            if len(coords) >= 3:
+                from shapely.geometry import Polygon, LinearRing
+                try:
+                    poly = Polygon(coords)
+                    geom = poly if poly.is_valid else poly.buffer(0)
+                except Exception:
+                    pass
+        if geom is None:
+            continue
+        row = dict(tags)
+        row["geometry"] = geom
+        row["osmid"]    = el["id"]
+        features.append(row)
+
+    if not features:
+        return _EMPTY.copy()
+    return gpd.GeoDataFrame(features, crs=4326)
+
+
 def _fetch_one(lat, lon, dist, tags) -> gpd.GeoDataFrame:
     """
-    Fetch OSM features using bbox query (spatial index).
-    Each endpoint attempt is hard-limited to 20s via requests_timeout.
-    If all endpoints fail or timeout, returns empty GDF gracefully.
+    Fetch OSM features via direct Overpass API HTTP call.
+    - Uses requests with explicit timeout (not ox.settings — thread-safe)
+    - Server-side [timeout:16] prevents runaway Overpass queries
+    - Tries 3 endpoints in order
+    - Returns empty GDF on any failure
     """
-    bbox = _bbox_from_point(lat, lon, dist)
+    north, south, east, west = _bbox_from_point(lat, lon, dist)
+    bbox_str     = f"{south},{west},{north},{east}"
+    filter_lines = _tags_to_overpass_filters(tags, bbox_str)
+    query = (
+        f"[out:json][timeout:{_OVERPASS_SERVER_TIMEOUT}];"
+        f"(\n{filter_lines}\n);\n"
+        f"out body; >;\nout skel qt;"
+    )
+
     for ep in _OVERPASS_ENDPOINTS:
         try:
-            ox.settings.overpass_endpoint  = ep
-            ox.settings.requests_timeout   = 20   # hard per-request limit
-            gdf = ox.features_from_bbox(bbox, tags=tags)
+            resp = _requests.post(
+                ep, data={"data": query},
+                timeout=_FETCH_TIMEOUT,
+                headers={"User-Agent": "ALKF-SiteAnalysis/1.0"}
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            if not data.get("elements"):
+                return _EMPTY.copy()
+
+            gdf = _overpass_json_to_gdf(data)
             if gdf is not None and not gdf.empty:
                 log.debug(f"[context] ✓ {ep.split('/')[2]} "
-                          f"{list(tags.keys())[:2]}")
+                          f"{list(tags.keys())[:2]} → {len(gdf)} rows")
                 return gdf.to_crs(3857)
             return _EMPTY.copy()
+
+        except _requests.exceptions.Timeout:
+            log.debug(f"[context] timeout {ep.split('/')[2]} "
+                      f"{list(tags.keys())[:2]}")
+            continue
         except Exception as e:
             log.debug(f"[context] ✗ {ep.split('/')[2]} "
                       f"{list(tags.keys())[:2]}: {type(e).__name__}")
             continue
+
     return _EMPTY.copy()
 
 
@@ -188,7 +295,7 @@ def _parallel_fetch(tasks: dict, wall_timeout: float = 35) -> dict:
     Fetch all OSM layers in parallel threads.
     wall_timeout reduced to 35s (from 120s) — must complete before
     Render's 30s health check kills the process.
-    Each individual fetch has a 25s timeout via ox.settings.requests_timeout.
+    Each individual fetch has an 18s hard timeout via requests.post(timeout=).
     """
     results = {k: _EMPTY.copy() for k in tasks}
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
