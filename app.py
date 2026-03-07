@@ -11,9 +11,6 @@ import os
 import time
 import logging
 import hashlib
-import asyncio
-import functools
-from contextlib import asynccontextmanager
 import requests
 from pyproj import Transformer
 from reportlab.platypus import SimpleDocTemplate, Image as RLImage, Spacer, Paragraph, PageBreak
@@ -26,29 +23,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from modules.walking import generate_walking
 from modules.driving import generate_driving
 from modules.transport import generate_transport
-from modules.context import generate_context, warm_cache
+from modules.context import generate_context
 from modules.view import generate_view
 from modules.noise import generate_noise
 
 # ── App ───────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Run warm_cache in a background executor thread on startup.
-    ZONE_DATA must exist at module level before lifespan fires,
-    which it does — it is loaded at import time above.
-    warm_cache is non-blocking: daemon threads do the Overpass
-    fetches; if they time out the server still starts normally.
-    """
-    loop = asyncio.get_event_loop()
-    loop.run_in_executor(
-        None,
-        functools.partial(warm_cache, ZONE_DATA)
-    )
-    yield   # server runs here
-
-
-app = FastAPI(title="Automated Site Analysis API", version="3.1", lifespan=lifespan)
+app = FastAPI(title="Automated Site Analysis API", version="3.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -130,6 +110,10 @@ def search(q: str, limit: int = 100):
     q = q.strip()
     if not q:
         return {"count": 0, "results": []}
+    # Require at least 4 characters to avoid firing on partial prefixes
+    # e.g. "IL" alone returns 100 unrelated results and misleads the user
+    if len(q) < 4:
+        return {"count": 0, "results": [], "hint": "Enter at least 4 characters"}
 
     results, seen = [], set()
     is_lot = _looks_like_lot_id(q)
