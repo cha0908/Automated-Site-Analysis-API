@@ -4,7 +4,7 @@ Matches the Colab reference output quality:
   - Real shortest-path walk route to nearest MTR
   - Type-driven building highlights
   - Clean labels, 400m catchment ring
-  - All rendered at 110 dpi
+  - All rendered at 100 dpi
 """
 import logging
 import os
@@ -230,8 +230,6 @@ def _draw_mtr(ax, x, y, zoom=0.035, zorder=14):
                 markeredgecolor="white", markeredgewidth=2, zorder=zorder)
 
 
-
-
 # ── Main generator ────────────────────────────────────────────────────────────
 
 def generate_context(
@@ -266,7 +264,7 @@ def generate_context(
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
         site_geom  = site_point.buffer(15)
         log.info("[context] fallback point")
-    site_render_geom = site_geom  # will be upgraded after OSM fetch
+    site_render_geom = site_geom
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -282,8 +280,8 @@ def generate_context(
     sp_label  = _SP_LABEL.get(SITE_TYPE, "Amenities")
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
-    # ── Parallel OSM fetch + walk graph (5 tasks concurrently) ──────────────
-    log.info("[context] Fetching OSM data + walk graph in parallel (120s)...")
+    # ── Parallel OSM fetch ────────────────────────────────────────────────────
+    log.info("[context] Fetching OSM data (120s)...")
 
     results = _parallel_fetch({
         "base": (lat, lon, max(fetch_r, 1200), {
@@ -312,7 +310,6 @@ def generate_context(
     industrial_area  = _filter(base, "landuse", ["industrial", "commercial"])
     parks_layer      = _filter(base, "leisure", "park")
 
-    # Bus stops
     bus_raw = _EMPTY.copy()
     if not base.empty and "highway" in base.columns:
         bs = base[_col(base, "highway") == "bus_stop"].copy()
@@ -321,7 +318,6 @@ def generate_context(
                 lambda g: g.centroid if g.geom_type != "Point" else g)
             bus_raw = gpd.GeoDataFrame(bs, crs=3857)
 
-    # Stations (from base)
     stations_all     = _filter(base, "railway", "station")
     stations_in_view = _EMPTY.copy()
     nearest_stn      = None
@@ -338,35 +334,28 @@ def generate_context(
             nearest_stn      = stn_sorted.iloc[0]
             nearest_stn_name = _ascii(str(nearest_stn["_name"]))
 
-    # Support buildings (polygons)
-    support_raw  = results["support"]
-    support_blds = _polys(support_raw)
-    schools_poly = _filter(support_raw, "amenity",
-                            ["school", "college", "university"]) \
-                   if not support_raw.empty else _EMPTY.copy()
+    support_raw    = results["support"]
+    support_blds   = _polys(support_raw)
+    schools_poly   = _filter(support_raw, "amenity",
+                              ["school", "college", "university"]) \
+                     if not support_raw.empty else _EMPTY.copy()
     hospitals_poly = _filter(support_raw, "amenity",
                               ["hospital", "clinic"]) \
                      if not support_raw.empty else _EMPTY.copy()
 
-    # Similar buildings — must be named AND reasonably large (named estate blocks)
-    # Colab style: only clearly identified residential developments, not every house
     _sim_raw = _polys(results["similar"])
 
     # ── Upgrade site polygon to nearest building footprint ────────────────────
-    # Like the Colab: find polygons within 40m of site_point, pick largest
-    site_render_geom = site_geom  # default: use lot boundary as-is
+    site_render_geom = site_geom
     if not _sim_raw.empty:
         try:
-            _nearby = _sim_raw[
-                _sim_raw.geometry.distance(site_point) < 40
-            ]
+            _nearby = _sim_raw[_sim_raw.geometry.distance(site_point) < 40]
             if not _nearby.empty:
                 _best = _nearby.assign(_a=_nearby.area).sort_values(
                     "_a", ascending=False).geometry.iloc[0]
                 site_render_geom = _best
                 log.info(f"[context] site from OSM building area={_best.area:.0f}m²")
             elif site_geom.area < 200:
-                # No building found nearby — use modest 20m buffer
                 site_render_geom = site_point.buffer(20)
                 log.info("[context] site: small buffer 20m")
         except Exception as e:
@@ -375,10 +364,9 @@ def generate_context(
         site_render_geom = site_point.buffer(20)
 
     site_gdf = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
+
     if not _sim_raw.empty:
-        _sim_raw        = _sim_raw.copy()
         _sim_raw["_nm"] = _name(_sim_raw)
-        # Require BOTH a name AND minimum 400m² — filters out individual row houses
         _has_name = _sim_raw["_nm"].apply(
             lambda x: bool(_ascii(str(x))) if pd.notna(x) else False)
         _large    = _sim_raw.geometry.area >= 600
@@ -387,7 +375,17 @@ def generate_context(
     else:
         similar_blds = _EMPTY.copy()
 
-    # Cluster bus stops to max 6
+    # Cap polygon count to protect render memory on Render free tier (512MB)
+    # 200 large polygons is visually identical to 500+ at any useful zoom level
+    if len(similar_blds) > 200:
+        similar_blds = similar_blds.assign(
+            _area=similar_blds.geometry.area
+        ).nlargest(200, "_area").drop(columns=["_area"])
+        log.info(f"[context] similar capped to 200 largest")
+
+    if len(support_blds) > 150:
+        support_blds = support_blds.head(150)
+
     bus_stops = bus_raw.copy()
     if len(bus_stops) > 10:
         try:
@@ -404,11 +402,10 @@ def generate_context(
             bus_stops = bus_stops.head(10)
     log.info(f"[context] bus stops: {len(bus_stops)}")
 
-
     # ── Place labels ──────────────────────────────────────────────────────────
-    labels_raw      = results["labels"]
-    all_labels      = []
-    seen            = set()
+    labels_raw = results["labels"]
+    all_labels = []
+    seen       = set()
 
     def _collect(gdf):
         if gdf is None or gdf.empty:
@@ -439,13 +436,15 @@ def generate_context(
     # RENDER
     # ═══════════════════════════════════════════════════════════════════════════
     log.info("[context] Rendering...")
-    fig, ax = plt.subplots(figsize=(16.15, 12))
+
+    # FIX: 14×10.5 at dpi=100 = 1400×1050px (vs 1777×1320 before)
+    # Saves ~40% of numpy array memory during render — critical on 512MB free tier
+    fig, ax = plt.subplots(figsize=(14, 10.5))
     ax.set_xlim(site_point.x - half_x, site_point.x + half_x)
     ax.set_ylim(site_point.y - half_y, site_point.y + half_y)
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    # Basemap — zoom=15 for 800m half-size (zoom=16 OOMs on larger area)
     try:
         cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
                        zoom=15, alpha=0.95)
@@ -461,7 +460,7 @@ def generate_context(
     ax.set_aspect("equal")
     ax.autoscale(False)
 
-    # ── zorder 1: Base landuse ────────────────────────────────────────────────
+    # zorder 1: Base landuse
     _safe_plot(residential_area, ax, color="#f2c6a0", alpha=0.75, zorder=1)
     _safe_plot(industrial_area,  ax, color="#b39ddb", alpha=0.75, zorder=1)
     _safe_plot(parks_layer,      ax, color="#b7dfb9", alpha=0.90, zorder=2)
@@ -470,18 +469,14 @@ def generate_context(
     del residential_area, industrial_area, parks_layer, schools_poly, hospitals_poly
     gc.collect()
 
-    # ── zorder 3-4: Type-specific buildings ───────────────────────────────────
+    # zorder 3-4: Type-specific buildings
     _safe_plot(support_blds, ax, color=sp_color, alpha=0.45, zorder=3)
     _safe_plot(similar_blds, ax, color=hi_color,  alpha=0.85, zorder=4,
                edgecolor="white", linewidth=0.3)
     del support_blds, similar_blds
     gc.collect()
 
-    # (catchment ring removed)
-
-    # (route to MTR removed)
-
-    # ── zorder 9: Bus stops ───────────────────────────────────────────────────
+    # zorder 9: Bus stops
     if not bus_stops.empty:
         try:
             for _, row in bus_stops.iterrows():
@@ -501,7 +496,7 @@ def generate_context(
     del bus_stops
     gc.collect()
 
-    # ── zorder 10-14: MTR stations ────────────────────────────────────────────
+    # zorder 10-14: MTR stations
     if not stations_in_view.empty:
         try:
             stations_in_view.plot(ax=ax, facecolor=MTR_COLOR,
@@ -512,12 +507,10 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station render: {e}")
 
-    # ── zorder 14-16: Site ────────────────────────────────────────────────────
+    # zorder 14-16: Site
     try:
-        # White glow
         site_gdf.plot(ax=ax, facecolor="none", edgecolor="white",
                       linewidth=6.0, zorder=14)
-        # Red fill
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="#b71c1c",
                       linewidth=2.5, zorder=15)
         sc = site_render_geom.centroid
@@ -526,7 +519,7 @@ def generate_context(
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
-    # ── zorder 12: Place labels ───────────────────────────────────────────────
+    # zorder 12: Place labels
     placed  = []
     offsets = [(0, 40), (0, -40), (40, 0), (-40, 0), (28, 28), (-28, 28)]
     for i, (geom, text) in enumerate(label_items):
@@ -547,7 +540,7 @@ def generate_context(
         except Exception:
             continue
 
-    # ── zorder 17: MTR station name labels ────────────────────────────────────
+    # zorder 17: MTR station name labels
     if not stations_in_view.empty:
         try:
             for _, st in stations_in_view.iterrows():
@@ -564,7 +557,7 @@ def generate_context(
         except Exception as e:
             log.debug(f"[context] station labels: {e}")
 
-    # ── Info box ──────────────────────────────────────────────────────────────
+    # Info box
     info = (f"{data_type}: {value}\n"
             f"OZP Plan: {primary['PLAN_NO']}\n"
             f"Zoning: {zone}\n"
@@ -576,7 +569,7 @@ def generate_context(
             bbox=dict(facecolor="white", edgecolor="black", pad=6),
             zorder=20)
 
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # Legend
     ax.legend(handles=[
         mpatches.Patch(color="#f2c6a0",   label="Residential Area"),
         mpatches.Patch(color="#b39ddb",   label="Industrial / Commercial"),
@@ -601,7 +594,7 @@ def generate_context(
     buf = BytesIO()
     plt.tight_layout()
     ax.set_position([0.02, 0.02, 0.96, 0.96])
-    plt.savefig(buf, format="png", dpi=110,
+    plt.savefig(buf, format="png", dpi=100,
                 bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     gc.collect()
