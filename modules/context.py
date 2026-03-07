@@ -318,21 +318,30 @@ def generate_context(
         log.info(f"[context] stations: {len(r)} rows")
 
     def _fetch_bus():
-        r = _fetch_osm(lat, lon, 900, {"highway": "bus_stop"})
+        r = _fetch_osm(lat, lon, 500, {"highway": "bus_stop"})
         _bus_result[0] = r
         log.info(f"[context] bus raw: {len(r)} rows")
 
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futs = [
-            pool.submit(_fetch_polygons),
-            pool.submit(_fetch_stations),
-            pool.submit(_fetch_bus),
-        ]
-        for f in as_completed(futs, timeout=30):
+        futs = {
+            pool.submit(_fetch_polygons): "polygons",
+            pool.submit(_fetch_stations): "stations",
+            pool.submit(_fetch_bus):      "bus",
+        }
+        # Per-future timeout — any single fetch capped at 25s
+        # prevents one slow query from blocking the entire pipeline
+        import concurrent.futures as _cf
+        done, pending = _cf.wait(futs, timeout=25,
+                                 return_when=_cf.ALL_COMPLETED)
+        for f in pending:
+            fname = futs[f]
+            log.warning(f"[context] {fname} fetch timed out — skipping")
+            f.cancel()
+        for f in done:
             try:
                 f.result()
             except Exception as e:
-                log.warning(f"[context] fetch error: {e}")
+                log.warning(f"[context] fetch error ({futs[f]}): {e}")
 
     log.info(f"[context] all fetches done in "
              f"{_time.monotonic()-t_fetch:.1f}s")
@@ -443,13 +452,22 @@ def generate_context(
         log.info(f"[context] bus stops: {len(bus_stops)}")
 
     # ── Place labels ──────────────────────────────────────────────────────────
-    labels_gdf = _fetch_osm(lat, lon, min(fetch_r, 800), {
-        "amenity": ["school", "college", "university", "hospital",
-                    "clinic", "supermarket", "library", "restaurant"],
-        "leisure": ["park", "garden"],
-        "place":   ["neighbourhood", "suburb"],
-        "tourism": ["attraction"],
-    })
+    # Labels fetch — also bounded to 20s
+    _lbl_result = [_EMPTY.copy()]
+    def _fetch_labels():
+        _lbl_result[0] = _fetch_osm(lat, lon, min(fetch_r, 800), {
+            "amenity": ["school", "college", "university", "hospital",
+                        "clinic", "supermarket", "library", "restaurant"],
+            "leisure": ["park", "garden"],
+            "place":   ["neighbourhood", "suburb"],
+            "tourism": ["attraction"],
+        })
+    lbl_thread = threading.Thread(target=_fetch_labels, daemon=True)
+    lbl_thread.start()
+    lbl_thread.join(timeout=20)
+    if lbl_thread.is_alive():
+        log.warning("[context] labels fetch timed out — skipping")
+    labels_gdf = _lbl_result[0]
 
     label_items = []
     seen_text   = set()
