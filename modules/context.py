@@ -39,6 +39,7 @@ from matplotlib.lines import Line2D
 import time as _time
 
 from modules.resolver import resolve_location, get_lot_boundary
+from modules import osm_builder as _osm_builder
 
 log = logging.getLogger(__name__)
 
@@ -101,7 +102,8 @@ def _load_local_datasets() -> None:
     """
     Load all 4 GeoPackages into memory.
     Thread-safe — only runs once even under concurrent first requests.
-    Each dataset is reprojected to EPSG:3857 and its STRtree pre-built.
+    If GeoPackages are missing, triggers osm_builder to download + parse
+    the HK OSM PBF at runtime (Render free tier allows runtime downloads).
     Estimated memory: ~400-600 MB for all of HK.
     """
     global _LOCAL
@@ -116,11 +118,16 @@ def _load_local_datasets() -> None:
             "transport": os.path.join(_DATA_DIR, "transport.gpkg"),
         }
 
+        # If any GeoPackage is missing, build them now via osm_builder
         missing = [k for k, p in files.items() if not os.path.exists(p)]
         if missing:
-            log.warning(f"[context] LOCAL datasets missing: {missing} "
-                        f"— Overpass API fallback will be used")
-            return
+            log.info(f"[context] GeoPackages missing: {missing} "
+                     f"— running OSM build pipeline (runtime download)...")
+            success = _osm_builder.build_local_datasets()
+            if not success:
+                log.warning("[context] OSM build failed — "
+                            "Overpass API fallback will be used")
+                return
 
         t0 = _time.monotonic()
         for attr, path in files.items():
