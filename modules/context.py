@@ -338,24 +338,63 @@ def generate_context(
     hi_label  = hi_cfg["label"]
     log.info(f"[context] zone={zone} SITE_TYPE={SITE_TYPE}")
 
-    # ── Single merged OSM fetch (like Colab) ──────────────────────────────────
-    # Fetch all needed tags in one call — avoids multiple round trips
-    log.info(f"[context] Fetching OSM data...")
+    # ── Parallel fetch: OSM polygons + MTR + bus stops + walk graph ──────────
+    # All 4 run concurrently — total time = slowest single fetch (~20s)
+    # instead of sequential ~60s which exceeds Render health check window
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    log.info("[context] Fetching OSM data + MTR + bus + walk graph (parallel)...")
     t_fetch = _time.monotonic()
 
-    polygons = _fetch_osm(lat, lon, max(fetch_r, 1200), {
-        "landuse":  True,
-        "leisure":  True,
-        "amenity":  True,
-        "building": True,
-        "tourism":  True,
-        "office":   True,
-    })
+    _poly_result  = [_EMPTY.copy()]
+    _stn_result   = [_EMPTY.copy()]
+    _bus_result   = [_EMPTY.copy()]
+    _graph_result = [None]
 
-    elapsed = _time.monotonic() - t_fetch
-    log.info(f"[context] OSM fetch: {len(polygons)} rows in {elapsed:.1f}s")
+    def _fetch_polygons():
+        _poly_result[0] = _fetch_osm(lat, lon, max(fetch_r, 1200), {
+            "landuse":  True,
+            "leisure":  True,
+            "amenity":  True,
+            "building": True,
+            "tourism":  True,
+            "office":   True,
+        })
+        log.info(f"[context] polygons: {len(_poly_result[0])} rows "
+                 f"in {_time.monotonic()-t_fetch:.1f}s")
 
-    # ── Extract base layers (identical to Colab) ──────────────────────────────
+    def _fetch_stations():
+        _stn_result[0] = _fetch_osm(lat, lon, 2000, {"railway": "station"})
+        log.info(f"[context] stations: {len(_stn_result[0])} rows")
+
+    def _fetch_bus():
+        _bus_result[0] = _fetch_osm(lat, lon, 900, {"highway": "bus_stop"})
+        log.info(f"[context] bus raw: {len(_bus_result[0])} rows")
+
+    def _fetch_graph():
+        _graph_result[0] = _get_walk_graph(lat, lon, dist=2000)
+        log.info(f"[context] walk graph: "
+                 f"{'ready' if _graph_result[0] else 'unavailable'}")
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futs = [
+            pool.submit(_fetch_polygons),
+            pool.submit(_fetch_stations),
+            pool.submit(_fetch_bus),
+            pool.submit(_fetch_graph),
+        ]
+        # Wait up to 35s total — gives each thread its own 20s Overpass timeout
+        for f in as_completed(futs, timeout=35):
+            try:
+                f.result()
+            except Exception as e:
+                log.warning(f"[context] parallel fetch error: {e}")
+
+    log.info(f"[context] all fetches done in {_time.monotonic()-t_fetch:.1f}s")
+
+    polygons = _poly_result[0]
+
+    # ── Extract base layers ───────────────────────────────────────────────────
     residential_area = _filter(polygons, "landuse", "residential")
     industrial_area  = _filter(polygons, "landuse",
                                 ["industrial", "commercial"])
@@ -391,11 +430,10 @@ def generate_context(
 
         hi_raw = _polys(polygons[mask].copy())
 
-        # Keep named buildings or area >= 600m² (matches Colab filter)
         if not hi_raw.empty:
-            names  = _get_name(hi_raw)
-            named  = names.apply(lambda x: bool(_ascii(str(x))))
-            large  = hi_raw.geometry.area >= 600
+            names        = _get_name(hi_raw)
+            named        = names.apply(lambda x: bool(_ascii(str(x))))
+            large        = hi_raw.geometry.area >= 600
             hi_buildings = hi_raw[named | large].copy()
 
         log.info(f"[context] highlight buildings: {len(hi_buildings)}")
@@ -424,9 +462,8 @@ def generate_context(
     del polygons
     gc.collect()
 
-    # ── MTR stations ──────────────────────────────────────────────────────────
-    log.info("[context] Fetching MTR stations...")
-    stations_gdf  = _fetch_osm(lat, lon, 2000, {"railway": "station"})
+    # ── Process MTR stations (from parallel result) ───────────────────────────
+    stations_gdf  = _stn_result[0]
     stations_plot = _EMPTY.copy()
     nearest_stn   = None
     nearest_name  = None
@@ -439,26 +476,22 @@ def generate_context(
         s["_dist"] = s.apply(
             lambda r: Point(r["_cx"], r["_cy"]).distance(site_point), axis=1)
         s = s.dropna(subset=["_name"]).sort_values("_dist")
-        # Show stations within map view
         stations_plot = s[s["_dist"] <= half_size * 1.5].head(3).copy()
 
         if not s.empty:
             best         = s.iloc[0]
             nearest_name = _ascii(str(best["_name"]))
-            # Convert centroid to WGS84 for walk graph node snapping
             nearest_stn  = gpd.GeoSeries(
                 [Point(best["_cx"], best["_cy"])], crs=3857
             ).to_crs(4326).iloc[0]
             log.info(f"[context] nearest MTR: {nearest_name} "
                      f"({best['_dist']:.0f}m)")
 
-    # ── Bus stops ──────────────────────────────────────────────────────────────
-    log.info("[context] Fetching bus stops...")
-    bus_raw   = _fetch_osm(lat, lon, 900, {"highway": "bus_stop"})
+    # ── Process bus stops (from parallel result) ──────────────────────────────
     bus_stops = _EMPTY.copy()
+    bus_raw   = _bus_result[0]
 
     if not bus_raw.empty:
-        # Ensure point geometry (Colab uses centroid)
         bs = bus_raw.copy()
         bs["geometry"] = bs.geometry.apply(
             lambda g: g.centroid if g.geom_type != "Point" else g)
@@ -479,23 +512,22 @@ def generate_context(
 
         log.info(f"[context] bus stops: {len(bus_stops)}")
 
-    # ── Walk route to nearest MTR ─────────────────────────────────────────────
+    # ── Walk route (uses graph from parallel result) ──────────────────────────
     walk_routes = []
-    if show_walk_route and nearest_stn is not None:
+    G           = _graph_result[0]
+
+    if show_walk_route and nearest_stn is not None and G is not None:
         log.info(f"[context] Walk route → {nearest_name}...")
         try:
-            G = _get_walk_graph(lat, lon, dist=2000)
-            if G is not None:
-                site_node = ox.distance.nearest_nodes(G, lon, lat)
-                stn_node  = ox.distance.nearest_nodes(
-                    G, nearest_stn.x, nearest_stn.y)
-                if site_node != stn_node:
-                    path = nx.shortest_path(
-                        G, site_node, stn_node, weight="length")
-                    route_gdf = ox.routing.route_to_gdf(G, path).to_crs(3857)
-                    walk_routes.append(route_gdf)
-                    log.info(f"[context] walk route: "
-                             f"{len(route_gdf)} segments")
+            site_node = ox.distance.nearest_nodes(G, lon, lat)
+            stn_node  = ox.distance.nearest_nodes(
+                G, nearest_stn.x, nearest_stn.y)
+            if site_node != stn_node:
+                path      = nx.shortest_path(
+                    G, site_node, stn_node, weight="length")
+                route_gdf = ox.routing.route_to_gdf(G, path).to_crs(3857)
+                walk_routes.append(route_gdf)
+                log.info(f"[context] walk route: {len(route_gdf)} segments")
         except Exception as e:
             log.warning(f"[context] walk route: {e}")
 
