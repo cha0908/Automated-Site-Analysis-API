@@ -43,8 +43,10 @@ log = logging.getLogger(__name__)
 # ── OSMnx settings (set once at module level — never mutated in threads) ──────
 ox.settings.use_cache           = True
 ox.settings.log_console         = False
-ox.settings.requests_timeout    = 22   # client socket timeout (seconds)
-ox.settings.overpass_settings   = "[out:json][timeout:20]"  # server-side query timeout
+ox.settings.timeout             = 20   # Overpass server-side query timeout (fills {timeout} in QL)
+ox.settings.requests_timeout    = 22   # HTTP socket timeout (client-side)
+# ox.settings.overpass_settings template = "[out:json][timeout:{timeout}]"
+# {timeout} is filled from ox.settings.timeout above — do NOT override the template directly
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 FETCH_RADIUS  = 600
