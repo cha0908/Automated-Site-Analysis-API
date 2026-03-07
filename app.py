@@ -9,6 +9,8 @@ from io import BytesIO
 import geopandas as gpd
 import os
 import time
+import asyncio
+import functools
 import logging
 import hashlib
 import requests
@@ -110,10 +112,6 @@ def search(q: str, limit: int = 100):
     q = q.strip()
     if not q:
         return {"count": 0, "results": []}
-    # Require at least 4 characters to avoid firing on partial prefixes
-    # e.g. "IL" alone returns 100 unrelated results and misleads the user
-    if len(q) < 4:
-        return {"count": 0, "results": [], "hint": "Enter at least 4 characters"}
 
     results, seen = [], set()
     is_lot = _looks_like_lot_id(q)
@@ -260,7 +258,13 @@ def transport(req: LocationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/context")
-def context(req: LocationRequest):
+async def context(req: LocationRequest):
+    """
+    Async endpoint — runs the blocking OSM fetch + render in a thread executor.
+    This keeps the FastAPI event loop free to answer health checks from Render
+    during the OSM fetch phase (which can take 30-75s on Overpass).
+    Without this, Render's health check times out and kills the process.
+    """
     try:
         dt, v, lon, lat, lot_ids, extents = normalise_request(req)
         if extents:
@@ -268,8 +272,15 @@ def context(req: LocationRequest):
         radius_m = req.context_radius_m if req.context_radius_m is not None else 600
         if radius_m not in CONTEXT_RADIUS_ALLOWED:
             radius_m = 600
-        img = run_analysis(dt, v, f"context_{radius_m}",
-            generate_context, dt, v, ZONE_DATA, radius_m, lon, lat, lot_ids, extents)
+        loop = asyncio.get_event_loop()
+        img  = await loop.run_in_executor(
+            None,
+            functools.partial(
+                run_analysis, dt, v, f"context_{radius_m}",
+                generate_context, dt, v, ZONE_DATA, radius_m,
+                lon, lat, lot_ids, extents
+            )
+        )
         return image_response(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
