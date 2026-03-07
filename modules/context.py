@@ -231,31 +231,29 @@ def _draw_mtr(ax, x, y, zoom=0.035, zorder=14):
                 markeredgecolor="white", markeredgewidth=2, zorder=zorder)
 
 
-def _walk_route(lat, lon, stn_lon, stn_lat, timeout=20) -> Optional[gpd.GeoDataFrame]:
-    """Compute real shortest-path walk route using OSMnx graph."""
-    import signal
+def _walk_route(lat, lon, stn_lon, stn_lat, timeout=22) -> Optional[gpd.GeoDataFrame]:
+    """Compute real shortest-path walk route — thread-based timeout safe on Render."""
+    import concurrent.futures as cf
 
-    def _handler(sig, frame):
-        raise TimeoutError("walk graph timeout")
-
-    try:
-        signal.signal(signal.SIGALRM, _handler)
-        signal.alarm(timeout)
+    def _compute():
         G = ox.graph_from_point((lat, lon), dist=1500, network_type="walk",
                                 simplify=True)
         site_node = ox.distance.nearest_nodes(G, lon, lat)
         stn_node  = ox.distance.nearest_nodes(G, stn_lon, stn_lat)
         path      = nx.shortest_path(G, site_node, stn_node, weight="length")
-        route_gdf = ox.routing.route_to_gdf(G, path).to_crs(3857)
-        signal.alarm(0)
-        log.info(f"[context] walk route: {len(route_gdf)} segments")
-        return route_gdf
+        return ox.routing.route_to_gdf(G, path).to_crs(3857)
+
+    try:
+        with cf.ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_compute)
+            result = fut.result(timeout=timeout)
+            log.info(f"[context] walk route: {len(result)} segments")
+            return result
+    except cf.TimeoutError:
+        log.warning(f"[context] walk graph timed out after {timeout}s")
+        return None
     except Exception as e:
         log.warning(f"[context] walk route failed: {e}")
-        try:
-            signal.alarm(0)
-        except Exception:
-            pass
         return None
 
 
@@ -287,14 +285,20 @@ def generate_context(
 
     if lot_gdf is not None and not lot_gdf.empty:
         site_geom  = lot_gdf.geometry.iloc[0]
-        site_gdf   = lot_gdf
         site_point = site_geom.centroid
+        # If lot is tiny (<500m²), buffer it so it's visible on map
+        if site_geom.area < 500:
+            site_render_geom = site_point.buffer(60)
+        else:
+            site_render_geom = site_geom
+        site_gdf   = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
         log.info(f"[context] lot boundary area={site_geom.area:.0f}m²")
     else:
         site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
-        site_geom  = site_point.buffer(80)
-        site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-        log.info("[context] fallback buffer 80m")
+        site_render_geom = site_point.buffer(60)
+        site_geom        = site_render_geom
+        site_gdf   = gpd.GeoDataFrame(geometry=[site_render_geom], crs=3857)
+        log.info("[context] fallback buffer 60m")
 
     # ── Zoning ────────────────────────────────────────────────────────────────
     ozp     = ZONE_DATA.to_crs(3857)
@@ -376,16 +380,18 @@ def generate_context(
                               ["hospital", "clinic"]) \
                      if not support_raw.empty else _EMPTY.copy()
 
-    # Similar buildings — named or large
+    # Similar buildings — must be named AND reasonably large (named estate blocks)
+    # Colab style: only clearly identified residential developments, not every house
     _sim_raw = _polys(results["similar"])
     if not _sim_raw.empty:
         _sim_raw        = _sim_raw.copy()
         _sim_raw["_nm"] = _name(_sim_raw)
-        _named  = _sim_raw["_nm"].apply(
+        # Require BOTH a name AND minimum 400m² — filters out individual row houses
+        _has_name = _sim_raw["_nm"].apply(
             lambda x: bool(_ascii(str(x))) if pd.notna(x) else False)
-        _large  = _sim_raw.geometry.area >= 500
-        similar_blds = _sim_raw[_named | _large].copy()
-        log.info(f"[context] similar: {len(similar_blds)}")
+        _large    = _sim_raw.geometry.area >= 400
+        similar_blds = _sim_raw[_has_name & _large].copy()
+        log.info(f"[context] similar (named+large): {len(similar_blds)}")
     else:
         similar_blds = _EMPTY.copy()
 
@@ -579,9 +585,9 @@ def generate_context(
         # Red fill
         site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="#b71c1c",
                       linewidth=2.5, zorder=15)
-        sc = site_geom.centroid
+        sc = site_render_geom.centroid
         ax.text(sc.x, sc.y, "SITE", color="white", weight="bold",
-                fontsize=8, ha="center", va="center", zorder=16)
+                fontsize=9, ha="center", va="center", zorder=16)
     except Exception as e:
         log.warning(f"[context] site render: {e}")
 
