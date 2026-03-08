@@ -877,7 +877,7 @@ reportlab
 - **Startup validation** — raises `ValueError` on missing `HEIGHT_M` column in building dataset
 - **CORS** — `allow_origins=["*"]` middleware added
 
-### v1.1.0
+### v2.0.0
 - PDF report generator (`/report` endpoint) — 7-page ReportLab output
 - In-memory caching layer — repeated requests return in < 1 s
 - Structured logging with request timing
