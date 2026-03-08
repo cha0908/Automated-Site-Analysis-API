@@ -396,7 +396,34 @@ def report(req: LocationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Health check ──────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════
+# PASTE THIS AT THE VERY BOTTOM OF main.py
+# Replaces your existing:   @app.get("/")  def root(): ...
+# ════════════════════════════════════════════════════════════════════════
+
+from fastapi import Response as _FResponse
+
+# DELETE your old root() and replace with these four routes:
+
 @app.get("/")
 def root():
-    return {"status": "Automated Site Analysis API v3.1 — Multi-lot enabled"}
+    return {"status": "Automated Site Analysis API v3.1"}
+
+@app.head("/")
+def root_head():
+    # Render health checker sends HEAD / every 30s.
+    # Without this, FastAPI returns 405 → Render restarts the service.
+    return _FResponse(status_code=200)
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.head("/health")
+def health_head():
+    return _FResponse(status_code=200)
+
+# ════════════════════════════════════════════════════════════════════════
+# Also go to: Render Dashboard → your service → Settings
+# Set "Health Check Path" to:  /health
+# ════════════════════════════════════════════════════════════════════════
