@@ -21,6 +21,7 @@ from reportlab.lib.units import inch
 from reportlab.lib import utils
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import Response as _FResponse
 
 from modules.walking import generate_walking
 from modules.driving import generate_driving
@@ -66,13 +67,13 @@ print("Startup complete.")
 class LocationRequest(BaseModel):
     data_type: str
     value:     str
-    lon:       Optional[float]      = None   # pre-resolved WGS84 lon
-    lat:       Optional[float]      = None   # pre-resolved WGS84 lat
-    lot_ids:   Optional[List[str]]  = None   # multi-lot: lot_id strings
-    extents:   Optional[List[dict]] = None   # multi-lot: {xmin,ymin,xmax,ymax} HK2326
-    max_walk_minutes:   Optional[int] = None   # walking scope 5-20, default 15
-    max_drive_minutes:  Optional[int] = None   # driving scope 5-20, default 15
-    context_radius_m:   Optional[int] = None   # context scope 600|800|1000, default 600
+    lon:       Optional[float]      = None
+    lat:       Optional[float]      = None
+    lot_ids:   Optional[List[str]]  = None
+    extents:   Optional[List[dict]] = None
+    max_walk_minutes:   Optional[int] = None
+    max_drive_minutes:  Optional[int] = None
+    context_radius_m:   Optional[int] = None
 
 def image_response(buf: BytesIO):
     buf.seek(0)
@@ -116,7 +117,6 @@ def search(q: str, limit: int = 100):
     results, seen = [], set()
     is_lot = _looks_like_lot_id(q)
 
-    # LOT search
     try:
         resp = requests.get(
             "https://mapapi.geodata.gov.hk/gs/api/v1.0.0/lus/lot/SearchNumber"
@@ -155,7 +155,6 @@ def search(q: str, limit: int = 100):
     except Exception as e:
         logging.warning(f"/search lot lookup failed: {e}")
 
-    # Address search
     if not is_lot:
         try:
             resp = requests.get(
@@ -188,16 +187,12 @@ def search(q: str, limit: int = 100):
 
 
 # ── /lot-boundary ─────────────────────────────────────────────
-# Called by the frontend Leaflet map to draw the polygon in the
-# "Site Preview" panel. Returns merged GeoJSON polygon in WGS84.
-# Single: GET /lot-boundary?lon=114.15&lat=22.28&data_type=LOT
-# Multi:  GET /lot-boundary?lon=...&lat=...&extents=[{...},{...}]
 @app.get("/lot-boundary")
 def lot_boundary(
     lon: float,
     lat: float,
     data_type: str = "LOT",
-    extents: Optional[str] = None,   # JSON-encoded list of extent dicts
+    extents: Optional[str] = None,
 ):
     import json
     from modules.resolver import get_lot_boundary
@@ -259,12 +254,6 @@ def transport(req: LocationRequest):
 
 @app.post("/context")
 async def context(req: LocationRequest):
-    """
-    Async endpoint — runs the blocking OSM fetch + render in a thread executor.
-    This keeps the FastAPI event loop free to answer health checks from Render
-    during the OSM fetch phase (which can take 30-75s on Overpass).
-    Without this, Render's health check times out and kills the process.
-    """
     try:
         dt, v, lon, lat, lot_ids, extents = normalise_request(req)
         if extents:
@@ -309,14 +298,80 @@ def noise(req: LocationRequest):
 
 
 # ── PDF report ────────────────────────────────────────────────
-# NOTE: generate_pdf_report now accepts lot_ids + extents and passes
-# them to every module call so multi-lot sites render correctly.
+
 def generate_pdf_report(data_type: str, value: str,
                          lon: float = None, lat: float = None,
                          lot_ids: list = None, extents: list = None):
+    """
+    Generates all analysis images IN PARALLEL using a ThreadPoolExecutor,
+    then assembles them into a PDF.
+
+    Each module runs concurrently — total wall time ≈ slowest single module
+    (~60-80s) instead of the sum of all modules (~400s+ sequential).
+
+    Uses shutdown(wait=False) after cf.wait so zombie threads (e.g. a slow
+    Overpass fetch) do not block PDF assembly after the timeout fires.
+    """
+    import concurrent.futures as _cf
+    from concurrent.futures import ThreadPoolExecutor
+
     lot_ids = lot_ids or []
     extents = extents or []
 
+    # ── Define all analysis tasks ─────────────────────────────
+    tasks = [
+        ("walking_5",    generate_walking,   [data_type, value, 5,  lon, lat, lot_ids, extents]),
+        ("walking_15",   generate_walking,   [data_type, value, 15, lon, lat, lot_ids, extents]),
+        ("driving_15",   generate_driving,   [data_type, value, ZONE_DATA, lon, lat, lot_ids, extents, 15]),
+        ("transport",    generate_transport, [data_type, value, lon, lat, lot_ids, extents]),
+        ("context_600",  generate_context,   [data_type, value, ZONE_DATA, 600, lon, lat, lot_ids, extents]),
+        ("noise",        generate_noise,     [data_type, value, lon, lat, lot_ids, extents]),
+    ]
+    titles = [
+        "Walking Accessibility (5 min)",
+        "Walking Accessibility (15 min)",
+        "Driving Distance",
+        "Transport Network",
+        "Context & Zoning",
+        "Noise Assessment",
+    ]
+
+    # ── Submit all tasks in parallel ──────────────────────────
+    # run_analysis handles cache hits — cached modules return instantly.
+    logging.info(f"[report] Launching {len(tasks)} analyses in parallel...")
+    t0 = time.time()
+
+    _pool = ThreadPoolExecutor(max_workers=len(tasks))
+    future_to_idx = {
+        _pool.submit(run_analysis, data_type, value, atype, func, *args): i
+        for i, (atype, func, args) in enumerate(tasks)
+    }
+
+    # Wait up to 180s for all tasks — enough for 2 sequential slow modules
+    # if one cache-hits and another has a slow Overpass fetch.
+    done, pending = _cf.wait(future_to_idx, timeout=180,
+                              return_when=_cf.ALL_COMPLETED)
+
+    for f in pending:
+        idx = future_to_idx[f]
+        logging.warning(f"[report] '{tasks[idx][0]}' timed out — using blank image")
+
+    # CRITICAL: shutdown(wait=False) — do not block on zombie threads
+    _pool.shutdown(wait=False)
+
+    logging.info(f"[report] All analyses done in {time.time()-t0:.1f}s "
+                 f"({len(done)} completed, {len(pending)} timed out)")
+
+    # ── Collect results in order ──────────────────────────────
+    imgs = [None] * len(tasks)
+    for f, idx in future_to_idx.items():
+        if f in done:
+            try:
+                imgs[idx] = f.result()
+            except Exception as e:
+                logging.warning(f"[report] '{tasks[idx][0]}' failed: {e}")
+
+    # ── Build PDF ─────────────────────────────────────────────
     buffer = BytesIO()
     landscape_a4 = (A4[1], A4[0])
     margin_pt    = 0.3 * inch
@@ -328,7 +383,7 @@ def generate_pdf_report(data_type: str, value: str,
         name="SlideTitle", parent=styles["Heading1"],
         fontSize=18, spaceAfter=4, alignment=1)
 
-    reserved_h_pt  = (title_style.fontSize*1.2*2 + title_style.spaceAfter) + 0.25*inch
+    reserved_h_pt  = (title_style.fontSize * 1.2 * 2 + title_style.spaceAfter) + 0.25 * inch
     max_image_w_pt = frame_w_pt
     max_image_h_pt = frame_h_pt - reserved_h_pt
 
@@ -336,46 +391,29 @@ def generate_pdf_report(data_type: str, value: str,
         leftMargin=margin_pt, rightMargin=margin_pt,
         topMargin=margin_pt,  bottomMargin=margin_pt)
 
-    logging.info("Generating report images...")
-
-    # Use run_analysis so we reuse cached results from individual panel requests
-    imgs = [
-        run_analysis(data_type, value, "walking_5",
-            generate_walking, data_type, value, 5,  lon, lat, lot_ids, extents),
-        run_analysis(data_type, value, "walking_15",
-            generate_walking, data_type, value, 15, lon, lat, lot_ids, extents),
-        run_analysis(data_type, value, "driving",
-            generate_driving, data_type, value, ZONE_DATA, lon, lat, lot_ids, extents),
-        run_analysis(data_type, value, "transport",
-            generate_transport, data_type, value, lon, lat, lot_ids, extents),
-        run_analysis(data_type, value, "context",
-            generate_context, data_type, value, ZONE_DATA, None, lon, lat, lot_ids, extents),        # run_analysis(data_type, value, "view",
-        #     generate_view, data_type, value, BUILDING_DATA, lon, lat, lot_ids, extents),
-        run_analysis(data_type, value, "noise",
-            generate_noise, data_type, value, lon, lat, lot_ids, extents),
-    ]
-    titles = [
-        "Walking Accessibility (5 min)", "Walking Accessibility (15 min)",
-        "Driving Distance", "Transport Network",
-        "Context & Zoning", "View Analysis", "Noise Assessment",
-    ]
-
     elements = []
-    elements.append(Spacer(1, 3*inch))
+    elements.append(Spacer(1, 3 * inch))
     elements.append(Paragraph("Site Analysis Report", title_style))
-    elements.append(Spacer(1, 0.3*inch))
+    elements.append(Spacer(1, 0.3 * inch))
     elements.append(Paragraph(f"{data_type} {value}", styles["Heading2"]))
     elements.append(PageBreak())
 
-    for i, (title, buf) in enumerate(zip(titles, imgs), 1):
+    for i, (title, buf_img) in enumerate(zip(titles, imgs), 1):
         elements.append(Paragraph(title, title_style))
-        elements.append(Spacer(1, 0.25*inch))
-        buf.seek(0)
-        data   = buf.read()
-        reader = utils.ImageReader(BytesIO(data))
-        iw, ih = reader.getSize()
-        scale  = min(max_image_w_pt/iw, max_image_h_pt/ih)
-        elements.append(RLImage(BytesIO(data), width=iw*scale, height=ih*scale))
+        elements.append(Spacer(1, 0.25 * inch))
+
+        if buf_img is None:
+            # Module timed out or failed — insert a placeholder paragraph
+            elements.append(Paragraph(
+                f"[{title} — analysis unavailable]", styles["Normal"]))
+        else:
+            buf_img.seek(0)
+            data   = buf_img.read()
+            reader = utils.ImageReader(BytesIO(data))
+            iw, ih = reader.getSize()
+            scale  = min(max_image_w_pt / iw, max_image_h_pt / ih)
+            elements.append(RLImage(BytesIO(data), width=iw * scale, height=ih * scale))
+
         if i < len(titles):
             elements.append(PageBreak())
 
@@ -384,35 +422,37 @@ def generate_pdf_report(data_type: str, value: str,
     return buffer
 
 
+# ── /report endpoint — async to keep event loop free ─────────
 @app.post("/report")
-def report(req: LocationRequest):
+async def report(req: LocationRequest):
+    """
+    Async endpoint — runs the blocking PDF generation in a thread executor.
+    Keeps the FastAPI event loop free to answer Render health checks (HEAD /)
+    during the ~60-90s it takes to generate all analysis images.
+    """
     try:
         dt, v, lon, lat, lot_ids, extents = normalise_request(req)
         logging.info(f"Generating FULL PDF report for {dt} {v}")
-        pdf = generate_pdf_report(dt, v, lon, lat, lot_ids, extents)
+        loop = asyncio.get_event_loop()
+        pdf  = await loop.run_in_executor(
+            None,
+            functools.partial(
+                generate_pdf_report, dt, v, lon, lat, lot_ids, extents
+            )
+        )
         return StreamingResponse(pdf, media_type="application/pdf",
             headers={"Content-Disposition": "attachment; filename=site_analysis_report.pdf"})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ════════════════════════════════════════════════════════════════════════
-# PASTE THIS AT THE VERY BOTTOM OF main.py
-# Replaces your existing:   @app.get("/")  def root(): ...
-# ════════════════════════════════════════════════════════════════════════
-
-from fastapi import Response as _FResponse
-
-# DELETE your old root() and replace with these four routes:
-
+# ── Health / root ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "Automated Site Analysis API v3.1"}
+    return {"status": "Automated Site Analysis API v3.0"}
 
 @app.head("/")
 def root_head():
-    # Render health checker sends HEAD / every 30s.
-    # Without this, FastAPI returns 405 → Render restarts the service.
     return _FResponse(status_code=200)
 
 @app.get("/health")
@@ -422,8 +462,3 @@ def health():
 @app.head("/health")
 def health_head():
     return _FResponse(status_code=200)
-
-# ════════════════════════════════════════════════════════════════════════
-# Also go to: Render Dashboard → your service → Settings
-# Set "Health Check Path" to:  /health
-# ════════════════════════════════════════════════════════════════════════
