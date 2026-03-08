@@ -10,6 +10,7 @@ Fixes applied (v2):
   4. Fetch radius expanded to 3500 m so lines entering from the edge are
      fully captured before the axis crops them.
   5. unary_union per colour group → single continuous geometry for labelling.
+Legend: single-column vertical list, bottom-left inside map (matches context.py)
 """
 
 from typing import Optional, List
@@ -49,9 +50,8 @@ log = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-MAP_RADIUS           = 2500   # axis half-extent (metres, Web-Mercator)
-FETCH_RADIUS         = 3500   # OSM fetch radius — wider than display so lines
-                               # that enter from the edge are fully captured
+MAP_RADIUS           = 2500
+FETCH_RADIUS         = 3500
 HALF_W               = 1900
 HALF_H               = 1100
 STATION_MIN_DISTANCE = 250
@@ -247,14 +247,9 @@ def _clean_name(val) -> Optional[str]:
     return ascii_only if ascii_only else None
 
 
-# ── MTR route fetch (FIXED) ───────────────────────────────────────────────────
+# ── MTR route fetch ───────────────────────────────────────────────────────────
 
 def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
-    """
-    FIX: Each batch is tagged with _src (rail / subway) BEFORE concat.
-    The dedup key is now (_osmid, _src) so railway=rail rows are never
-    dropped in favour of railway=subway rows that share the same OSM id.
-    """
     frames = []
 
     for src_tag, tags in [("rail",   {"railway": "rail"}),
@@ -267,7 +262,7 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
             del raw
             gc.collect()
 
-            flat["_src"] = src_tag          # ← tag the batch
+            flat["_src"] = src_tag
 
             log.info(f"[transport] MTR {tags}: {len(flat)} rows "
                      f"types={flat.geometry.geom_type.value_counts().to_dict()}")
@@ -294,7 +289,6 @@ def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
         del frames
         gc.collect()
 
-        # Dedup by (osmid, src) — preserves rail AND subway rows
         if "_osmid" in combined.columns and "_src" in combined.columns:
             combined["_dedup_key"] = combined["_osmid"].astype(str) + "_" + combined["_src"]
             combined = (combined
@@ -368,7 +362,6 @@ def generate_transport(
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    # Set axis limits FIRST so contextily fetches the right tiles
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect("equal")
@@ -381,7 +374,7 @@ def generate_transport(
     except Exception as e:
         log.warning(f"[transport] basemap failed: {e}")
 
-    # ── Roads (zorder 3) ──────────────────────────────────────────────────────
+    # ── Roads ─────────────────────────────────────────────────────────────────
     if not roads.empty:
         try:
             roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.0, zorder=3, alpha=0.85)
@@ -390,9 +383,7 @@ def generate_transport(
     del roads
     gc.collect()
 
-    # ── MTR routes (zorder 6 / 7 — above roads) ───────────────────────────────
-    # FIX: do NOT use gpd.clip() — matplotlib axis limits provide the visual
-    # crop. Clipping cuts lines at the bbox edge producing "half drawn" artefacts.
+    # ── MTR routes ────────────────────────────────────────────────────────────
     lines_on_map: dict = {}
 
     if not mtr_routes.empty:
@@ -406,7 +397,6 @@ def generate_transport(
                     break
 
             if name_col is None:
-                # No names — draw everything in default blue
                 mtr_routes.plot(ax=ax, color="white",           linewidth=8,   zorder=6)
                 mtr_routes.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=7)
                 lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
@@ -422,11 +412,9 @@ def generate_transport(
                     lc = get_mtr_color(cname)
                     log.info(f"[transport] Drawing '{cname}' → color={lc} n={len(grp)}")
 
-                    # Plot without clipping — full lines, axis crops visually
                     grp.plot(ax=ax, color="white", linewidth=8,   zorder=6)
                     grp.plot(ax=ax, color=lc,      linewidth=4.5, zorder=7)
 
-                    # Legend entry — deduplicated by color
                     if lc not in lines_on_map:
                         official = cname.title()
                         for k, _c, lbl in MTR_LEGEND_LINES:
@@ -435,13 +423,11 @@ def generate_transport(
                                 break
                         lines_on_map[lc] = official
 
-                    # Line label — use unary_union so short segments join up
                     try:
                         merged = shapely_union(grp.geometry.tolist())
                         if merged is None or merged.is_empty or merged.length < 400:
                             continue
                         mid   = merged.interpolate(0.5, normalized=True)
-                        # Skip labels outside the visible area
                         if not (xmin <= mid.x <= xmax and ymin <= mid.y <= ymax):
                             continue
                         off_y = sum(150 for pp in placed_lbl if mid.distance(pp) < 500)
@@ -455,7 +441,6 @@ def generate_transport(
                     except Exception as le:
                         log.debug(f"[transport] label '{cname}': {le}")
 
-                # Draw unnamed only if nothing named was in view
                 if not unnamed.empty and named.empty:
                     unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=6)
                     unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=7)
@@ -467,7 +452,7 @@ def generate_transport(
     del mtr_routes
     gc.collect()
 
-    # ── Stations (zorder 9+) ──────────────────────────────────────────────────
+    # ── Stations ──────────────────────────────────────────────────────────────
     if not stations.empty:
         try:
             stns        = stations.copy()
@@ -502,7 +487,7 @@ def generate_transport(
     del stations
     gc.collect()
 
-    # ── Site (always on top) ──────────────────────────────────────────────────
+    # ── Site ──────────────────────────────────────────────────────────────────
     try:
         site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="white",
                       linewidth=2.5, zorder=13)
@@ -522,11 +507,10 @@ def generate_transport(
     ax.text(0.07, 0.86, "N", transform=ax.transAxes,
             ha="center", va="bottom", fontsize=12, weight="bold")
 
-    # Re-apply limits after all plotting to prevent any auto-scaling
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    # ── Legend ────────────────────────────────────────────────────────────────
+    # ── Legend — single-column vertical, bottom-left inside map ───────────────
     legend_handles = []
 
     seen_lc = set()
@@ -575,37 +559,26 @@ def generate_transport(
                           markeredgewidth=2, markersize=10, label="MTR Station"))
 
     if legend_handles:
-        # Place legend BELOW the axes so it never overlaps map content.
-        # bbox_to_anchor y<0 pushes it outside the plot area.
-        ncols = max(3, (len(legend_handles) + 2) // 3)  # always 3+ columns → wide & short
-        legend = ax.legend(
+        ax.legend(
             handles=legend_handles,
             handler_map=handler_map if handler_map else None,
-            loc="upper left",
-            bbox_to_anchor=(0.0, -0.04),
-            bbox_transform=ax.transAxes,
-            ncol=ncols,
-            frameon=True,
-            facecolor="white",
-            edgecolor="#333333",
+            loc="lower left",
+            bbox_to_anchor=(0.02, 0.02),   # inside map, bottom-left
+            ncol=1,                         # single column — matches context.py
+            framealpha=0.95,
+            edgecolor="none",
             fontsize=8.5,
-            title_fontsize=9,
-            labelspacing=0.3,
+            labelspacing=0.4,
             handlelength=1.6,
-            handleheight=0.9,
-            handletextpad=0.5,
-            columnspacing=1.2,
-            borderpad=0.5,
-            title="Legend",
+            borderpad=0.6,
         )
-        legend.get_frame().set_linewidth(1.5)
 
     ax.set_title(f"SITE ANALYSIS – Transportation ({data_type} {value})",
                  fontsize=18, weight="bold")
     ax.set_axis_off()
 
     buf = BytesIO()
-    fig.subplots_adjust(bottom=0.14)   # reserve space below axes for legend
+    fig.subplots_adjust(bottom=0.0)   # no bottom reserve needed — legend is inside map
     plt.savefig(buf, format="png", dpi=150,
                 bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
