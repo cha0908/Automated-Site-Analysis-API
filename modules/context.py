@@ -36,7 +36,7 @@ ox.settings.requests_timeout = 25
 
 _STATIC        = os.path.join(os.path.dirname(__file__), "..", "static")
 _MTR_LOGO_PATH = os.path.join(_STATIC, "HK_MTR_logo.png")
-_BUS_ICON_PATH = os.path.join(_STATIC, "bus.png")   # ← added
+_BUS_ICON_PATH = os.path.join(_STATIC, "bus.png")
 
 FETCH_RADIUS  = 1500
 MAP_HALF_SIZE = 900
@@ -46,7 +46,7 @@ BUS_FETCH_R   = 1200
 MTR_RADIUS_M  = 2000
 LABEL_RADIUS  = 800
 FIG_SIZE      = 12
-FIG_DPI       = 150
+FIG_DPI       = 120
 BASEMAP_ZOOM  = 16
 
 
@@ -70,7 +70,6 @@ if _MTR_IMG is not None:
     except Exception as e:
         log.warning("context: MTR thumb failed (%s)", e)
 
-# ← added: load bus icon once at startup
 _BUS_IMG = None
 try:
     _BUS_IMG = mpimg.imread(_BUS_ICON_PATH)
@@ -132,7 +131,7 @@ def _clip_to_map(gdf, xmin, ymin, xmax, ymax):
         return gdf
 
 
-def _spread_bus_stops(gdf, site_pt, n_total=10, min_dist_m=60):
+def _spread_bus_stops(gdf, site_pt, n_total=10, min_dist_m=150):
     if gdf.empty:
         return _empty_gdf()
     gdf = gdf.copy()
@@ -248,7 +247,7 @@ def generate_context(
     # 6. Bus stops
     log.info("context: fetching bus stops")
     bus_raw   = _safe_osm(lat, lon, BUS_FETCH_R, {"highway": "bus_stop"}, "bus_stops")
-    bus_stops = _spread_bus_stops(bus_raw, site_pt, BUS_COUNT, min_dist_m=60)
+    bus_stops = _spread_bus_stops(bus_raw, site_pt, BUS_COUNT, min_dist_m=150)
     del bus_raw; gc.collect()
     log.info("context: %d bus stops selected", len(bus_stops))
 
@@ -300,7 +299,7 @@ def generate_context(
             cx_ = float(st["_cx"])
             cy_ = float(st["_cy"])
             if _MTR_THUMB is not None:
-                icon = OffsetImage(_MTR_THUMB, zoom=1.0)
+                icon = OffsetImage(_MTR_THUMB, zoom=0.8)
                 icon.image.axes = ax
                 ax.add_artist(AnnotationBbox(
                     icon, (cx_, cy_),
@@ -320,14 +319,14 @@ def generate_context(
     gc.collect()
     log.info("context: stations done")
 
-    # Bus stops — ← only change from v8: icon if available, else navy dot
+    # Bus stops
     log.info("context: plotting bus stops")
     if not bus_stops.empty:
         bxs = bus_stops["_cx"].tolist()
         bys = bus_stops["_cy"].tolist()
         if _BUS_IMG is not None:
             for bx, by in zip(bxs, bys):
-                icon = OffsetImage(_BUS_IMG, zoom=0.028)
+                icon = OffsetImage(_BUS_IMG, zoom=0.016)
                 icon.image.axes = ax
                 ax.add_artist(AnnotationBbox(
                     icon, (bx, by),
