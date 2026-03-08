@@ -1,12 +1,12 @@
 """
-modules/context.py  v7
-──────────────────────────────────────────────────────────────────────────────
-v7 crash fixes:
-  - Bus stops: AnnotationBbox removed entirely — plain ax.scatter() dots only
-  - MTR logo: single shared OffsetImage reused across stations (not recreated)
-  - Landuse: clip to map bbox BEFORE plotting (5976→~200 rows)
-  - buildings layer removed (too many polygons, not in reference output)
-  - del + gc after every heavy operation
+modules/context.py  v8
+Matches image-2 (Colab reference) exactly:
+  - Bus stops: small solid navy dots (markersize ~8), no icon
+  - MTR: yellow polygon footprint + small MTR logo (~0.045 zoom) on centroid
+  - Station name: small fontsize=8.5 label above centroid
+  - Legend: single-column vertical list, bottom-left inside map (like Colab)
+  - Basemap: PositronNoLabels, zoom=16 (crisp like image 2)
+  - Fig: 12x12 but landuse clipped to bbox first to keep memory low
 """
 
 import io
@@ -50,9 +50,9 @@ BUS_COUNT     = 10
 BUS_FETCH_R   = 1200
 MTR_RADIUS_M  = 2000
 LABEL_RADIUS  = 800
-FIG_SIZE      = 10
-FIG_DPI       = 120
-BASEMAP_ZOOM  = 15
+FIG_SIZE      = 12      # back to 12 — landuse clipping keeps memory safe
+FIG_DPI       = 150
+BASEMAP_ZOOM  = 16      # zoom=16 matches image-2 crispness
 
 
 def _load_mtr():
@@ -65,6 +65,16 @@ def _load_mtr():
         return None
 
 _MTR_IMG = _load_mtr()
+
+# Pre-resize MTR logo once at module load — 22px, reused every request
+_MTR_THUMB = None
+if _MTR_IMG is not None:
+    try:
+        raw        = (_MTR_IMG*255).astype(np.uint8) if _MTR_IMG.dtype != np.uint8 else _MTR_IMG
+        _MTR_THUMB = np.array(Image.fromarray(raw).resize((22, 22), Image.LANCZOS))
+        log.info("context: MTR thumb pre-built")
+    except Exception as e:
+        log.warning("context: MTR thumb failed (%s)", e)
 
 
 def _wrap(text, width=18):
@@ -108,16 +118,15 @@ def _safe_osm(lat, lon, dist, tags, label=""):
 
 
 def _clip_to_map(gdf, xmin, ymin, xmax, ymax):
-    """Clip GeoDataFrame to map bbox to reduce polygon count before plotting."""
     if gdf.empty:
         return gdf
     try:
-        clip_box = gpd.GeoDataFrame(geometry=[sbox(xmin, ymin, xmax, ymax)], crs=3857)
-        clipped  = gpd.clip(gdf, clip_box)
+        cb      = gpd.GeoDataFrame(geometry=[sbox(xmin, ymin, xmax, ymax)], crs=3857)
+        clipped = gpd.clip(gdf, cb)
         log.info("context: clipped %d → %d rows", len(gdf), len(clipped))
         return clipped
     except Exception as e:
-        log.warning("context: clip failed (%s), using full gdf", e)
+        log.warning("context: clip failed (%s)", e)
         return gdf
 
 
@@ -125,19 +134,15 @@ def _spread_bus_stops(gdf, site_pt, n_total=10, min_dist_m=60):
     if gdf.empty:
         return _empty_gdf()
     gdf = gdf.copy()
-    gdf["_cx"] = gdf.geometry.apply(
-        lambda g: g.x if g.geom_type == "Point" else g.centroid.x)
-    gdf["_cy"] = gdf.geometry.apply(
-        lambda g: g.y if g.geom_type == "Point" else g.centroid.y)
+    gdf["_cx"] = gdf.geometry.apply(lambda g: g.x if g.geom_type=="Point" else g.centroid.x)
+    gdf["_cy"] = gdf.geometry.apply(lambda g: g.y if g.geom_type=="Point" else g.centroid.y)
     gdf["_dx"] = gdf["_cx"] - site_pt.x
     gdf["_dy"] = gdf["_cy"] - site_pt.y
     gdf["_d"]  = np.hypot(gdf["_dx"], gdf["_dy"])
     gdf = gdf.sort_values("_d")
 
     quota    = max(1, (n_total + 3) // 4)
-    selected = []
-    q_counts = {}
-    q_placed = {}
+    selected, q_counts, q_placed = [], {}, {}
 
     for _, row in gdf.iterrows():
         q  = (int(row["_dx"] >= 0), int(row["_dy"] >= 0))
@@ -192,7 +197,7 @@ def generate_context(
     s_type  = _infer_site_type(zone)
     log.info("context: zone=%s type=%s", zone, s_type)
 
-    # 3. Landuse — fetch then CLIP to map extent immediately
+    # 3. Landuse — clip to bbox immediately
     log.info("context: fetching landuse")
     polys_raw = _safe_osm(lat, lon, FETCH_RADIUS,
                           {"landuse": True, "leisure": True, "amenity": True},
@@ -213,13 +218,12 @@ def generate_context(
         residential = industrial = parks = schools = _empty_gdf()
 
     # 4. Site footprint
-    lot_gdf = get_lot_boundary(lon, lat, data_type,
-                               extents if len(extents) > 1 else None)
+    lot_gdf   = get_lot_boundary(lon, lat, data_type,
+                                 extents if len(extents) > 1 else None)
     site_geom = (lot_gdf.geometry.iloc[0]
                  if lot_gdf is not None and not lot_gdf.empty
                  else site_pt.buffer(80))
     site_gdf  = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
-    log.info("context: site footprint ready")
 
     # 5. MTR stations
     log.info("context: fetching stations")
@@ -232,11 +236,11 @@ def generate_context(
         stations["_cx"] = stations.geometry.centroid.x
         stations["_cy"] = stations.geometry.centroid.y
         stations["_d"]  = stations.geometry.centroid.distance(site_pt)
-        stations = stations.dropna(subset=["_name"]).sort_values("_d").head(4)
-        # keep only stations inside map extent
+        stations = (stations.dropna(subset=["_name"])
+                             .sort_values("_d").head(4))
         stations = stations[
-            (stations["_cx"] >= xmin) & (stations["_cx"] <= xmax) &
-            (stations["_cy"] >= ymin) & (stations["_cy"] <= ymax)
+            (stations["_cx"].between(xmin, xmax)) &
+            (stations["_cy"].between(ymin, ymax))
         ]
 
     # 6. Bus stops
@@ -256,10 +260,11 @@ def generate_context(
                            else (nz if nz is not None else None))
         labels = labels.dropna(subset=["label"]).drop_duplicates("label").head(24)
 
-    # ── 8. FIGURE ─────────────────────────────────────────────────────────────
-    log.info("context: building figure")
+    # ── FIGURE ────────────────────────────────────────────────────────────────
+    log.info("context: building figure zoom=%d figsize=%d dpi=%d",
+             BASEMAP_ZOOM, FIG_SIZE, FIG_DPI)
+
     fig, ax = plt.subplots(figsize=(FIG_SIZE, FIG_SIZE))
-    fig.subplots_adjust(bottom=0.14)
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect("equal")
@@ -277,7 +282,6 @@ def generate_context(
     log.info("context: basemap done")
 
     # Landuse
-    log.info("context: plotting landuse")
     if not residential.empty: residential.plot(ax=ax, color="#f2c6a0", alpha=0.75, zorder=1)
     if not industrial.empty:  industrial.plot(ax=ax,  color="#b39ddb", alpha=0.75, zorder=1)
     if not parks.empty:       parks.plot(ax=ax,       color="#b7dfb9", alpha=0.90, zorder=2)
@@ -285,62 +289,58 @@ def generate_context(
     del residential, industrial, parks, schools; gc.collect()
     log.info("context: landuse done")
 
-    # MTR stations — polygon fill + logo using scatter (no AnnotationBbox loop)
+    # MTR station polygons (yellow) + small logo on centroid
     log.info("context: plotting MTR stations")
     if not stations.empty:
-        stations.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="#b8860b",
-                      linewidth=1.5, alpha=0.95, zorder=8)
+        stations.plot(ax=ax, facecolor=MTR_COLOR, edgecolor="none",
+                      linewidth=0, alpha=0.90, zorder=10)
 
-        if _MTR_IMG is not None:
-            # Resize once, reuse for all stations
-            raw   = (_MTR_IMG * 255).astype(np.uint8) if _MTR_IMG.dtype != np.uint8 else _MTR_IMG
-            thumb = np.array(Image.fromarray(raw).resize((28, 28), Image.LANCZOS))
-            for _, st in stations.iterrows():
-                cx_ = float(st["_cx"])
-                cy_ = float(st["_cy"])
-                icon = OffsetImage(thumb, zoom=1.0)
+        for _, st in stations.iterrows():
+            cx_ = float(st["_cx"])
+            cy_ = float(st["_cy"])
+            # MTR logo — small, matches image-2 style
+            if _MTR_THUMB is not None:
+                icon = OffsetImage(_MTR_THUMB, zoom=1.0)
                 icon.image.axes = ax
-                ax.add_artist(AnnotationBbox(icon, (cx_, cy_),
-                                             frameon=False, zorder=13,
-                                             box_alignment=(0.5, 0.5)))
-                nm = st.get("_name", "")
-                if nm and isinstance(nm, str):
-                    ax.text(cx_, cy_ + 130, _wrap(nm, 18),
-                            fontsize=8, ha="center", va="bottom", weight="bold",
-                            bbox=dict(facecolor="white", edgecolor="none",
-                                      alpha=0.85, pad=2),
-                            zorder=14, clip_on=True)
-            del thumb, raw
-        else:
-            # Fallback: draw roundel circles via scatter
-            xs = stations["_cx"].tolist()
-            ys = stations["_cy"].tolist()
-            ax.scatter(xs, ys, s=600, c="#ED1D24",
-                       edgecolors="white", linewidths=2, zorder=13)
+                ax.add_artist(AnnotationBbox(
+                    icon, (cx_, cy_),
+                    frameon=False, zorder=12,
+                    box_alignment=(0.5, 0.5)
+                ))
+            else:
+                ax.scatter([cx_], [cy_], s=300, c="#ED1D24",
+                           edgecolors="white", linewidths=1.5, zorder=12)
 
+            # Station name — same compact white-box style as image-2
+            nm = st.get("_name", "")
+            if nm and isinstance(nm, str):
+                ax.text(cx_, cy_ + 120, _wrap(nm, 16),
+                        fontsize=8.5, ha="center", va="bottom",
+                        bbox=dict(facecolor="white", edgecolor="none",
+                                  alpha=0.8, pad=1.0),
+                        zorder=13, clip_on=True)
     gc.collect()
     log.info("context: stations done")
 
-    # Bus stops — plain scatter dots, zero memory overhead
+    # Bus stops — small solid navy dots, exactly like image-2
     log.info("context: plotting bus stops")
     if not bus_stops.empty:
         bxs = bus_stops["_cx"].tolist()
         bys = bus_stops["_cy"].tolist()
-        ax.scatter(bxs, bys, s=120, c="#0d47a1",
-                   edgecolors="white", linewidths=1.5, zorder=10)
+        ax.scatter(bxs, bys, s=55, c="#0d47a1",
+                   edgecolors="white", linewidths=1.2, zorder=9)
     log.info("context: bus stops done")
 
-    # Site
-    log.info("context: plotting site")
+    # Site polygon
     site_gdf.plot(ax=ax, facecolor="#e53935", edgecolor="darkred",
-                  linewidth=2.5, zorder=14)
+                  linewidth=2, zorder=11)
     ax.text(site_geom.centroid.x, site_geom.centroid.y, "SITE",
             color="white", weight="bold", ha="center", va="center",
-            fontsize=9, zorder=15)
+            fontsize=9, zorder=12)
 
-    # Place labels
-    offsets = [(0,40),(0,-40),(40,0),(-40,0),(30,30),(-30,30),
-               (30,-30),(-30,-30),(0,55),(55,0),(-55,0),(0,-55)]
+    # Place labels — white rounded box, same as image-2
+    offsets = [(0,35),(0,-35),(35,0),(-35,0),(25,25),(-25,25),
+               (25,-25),(-25,-25),(0,50),(50,0),(-50,0),(0,-50)]
     placed = []
     if not labels.empty and "label" in labels.columns:
         for i, (_, lrow) in enumerate(labels.iterrows()):
@@ -348,70 +348,54 @@ def generate_context(
                 p = lrow.geometry.representative_point()
             except Exception:
                 continue
-            if p.distance(site_pt) < 120:
+            if p.distance(site_pt) < 140:
                 continue
-            if any(p.distance(pp) < 100 for pp in placed):
+            if any(p.distance(pp) < 120 for pp in placed):
                 continue
             dx, dy = offsets[i % len(offsets)]
             ax.text(p.x+dx, p.y+dy, _wrap(lrow["label"], 18),
                     fontsize=9, ha="center", va="center",
                     bbox=dict(facecolor="white", edgecolor="none",
-                              alpha=0.85, boxstyle="round,pad=0.3"),
+                              alpha=0.85, boxstyle="round,pad=0.25"),
                     zorder=12, clip_on=True)
             placed.append(p)
 
-    # Info box
+    # Info box — top-left, exactly like image-2
     ax.text(0.015, 0.985,
             f"Lot: {value}\nOZP Plan: {plan_no}\nZoning: {zone}\nSite Type: {s_type}\n",
             transform=ax.transAxes, ha="left", va="top", fontsize=9.2,
             bbox=dict(facecolor="white", edgecolor="black", pad=6))
 
-    # Legend
-    legend_handles = [
-        mpatches.Patch(color="#f2c6a0", label="Residential"),
-        mpatches.Patch(color="#b39ddb", label="Industrial / Commercial"),
-        mpatches.Patch(color="#b7dfb9", label="Public Park"),
-        mpatches.Patch(color="#9ecae1", label="School / Institution"),
-        mpatches.Patch(color=MTR_COLOR,  label="MTR Station"),
-        mpatches.Patch(color="#e53935",  label="Site"),
-        mlines.Line2D([], [], marker="o", linestyle="None",
-                      markerfacecolor="#0d47a1", markeredgecolor="white",
-                      markeredgewidth=1.5, markersize=9, label="Bus Stop"),
-    ]
-    handler_map = {}
-
-    if _MTR_IMG is not None:
-        try:
-            raw   = (_MTR_IMG*255).astype(np.uint8) if _MTR_IMG.dtype != np.uint8 else _MTR_IMG
-            lthumb = np.array(Image.fromarray(raw).resize((20, 20), Image.LANCZOS))
-            class _MLH(mlines.Line2D): pass
-            class _MLHH(lh.HandlerBase):
-                def create_artists(self, legend, orig, xd, yd, w, h, fs, trans):
-                    return [AnnotationBbox(OffsetImage(lthumb, zoom=1.0),
-                                          (xd+w/2, yd+h/2),
-                                          xycoords=trans, frameon=False)]
-            legend_handles.append(_MLH([], [], label="MTR Icon"))
-            handler_map[_MLH] = _MLHH()
-        except Exception:
-            pass
-
+    # Legend — single column vertical list, bottom-left inside map
+    # Exactly matches image-2 style
     ax.legend(
-        handles=legend_handles,
-        handler_map=handler_map or None,
-        loc="upper left",
-        bbox_to_anchor=(0.0, -0.02),
-        bbox_transform=ax.transAxes,
-        ncol=4, fontsize=8.5, framealpha=0.95,
-        edgecolor="#333", title="Legend", title_fontsize=9,
-        labelspacing=0.3, handlelength=1.4,
-        borderpad=0.5, columnspacing=1.0,
+        handles=[
+            mpatches.Patch(color="#f2c6a0", label="Residential"),
+            mpatches.Patch(color="#b39ddb", label="Industrial / Commercial"),
+            mpatches.Patch(color="#b7dfb9", label="Public Park"),
+            mpatches.Patch(color="#9ecae1", label="School / Institution"),
+            mpatches.Patch(color=MTR_COLOR,  label="MTR Station"),
+            mpatches.Patch(color="#e53935",  label="Site"),
+            mlines.Line2D([], [], marker="o", linestyle="None",
+                          markerfacecolor="#0d47a1", markeredgecolor="white",
+                          markeredgewidth=1.2, markersize=7, label="Bus Stop"),
+        ],
+        loc="lower left",
+        bbox_to_anchor=(0.02, 0.02),   # inside map, bottom-left
+        ncol=1,                         # single column — matches image-2
+        fontsize=8.5,
+        framealpha=0.95,
+        edgecolor="none",
+        labelspacing=0.4,
+        handlelength=1.2,
+        borderpad=0.6,
     )
 
     ax.set_title("Automated Site Context Analysis (Building-Type Driven)",
                  fontsize=15, weight="bold")
     ax.set_axis_off()
 
-    log.info("context: saving PNG dpi=%d", FIG_DPI)
+    log.info("context: saving PNG")
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=FIG_DPI, bbox_inches="tight")
     plt.close(fig)
