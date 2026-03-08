@@ -1,7 +1,7 @@
 """
 modules/context.py  v8
 Matches image-2 (Colab reference) exactly:
-  - Bus stops: small solid navy dots (markersize ~8), no icon
+  - Bus stops: bus.png icon (OffsetImage zoom=0.028), fallback to navy dot
   - MTR: yellow polygon footprint + small MTR logo (~0.045 zoom) on centroid
   - Station name: small fontsize=8.5 label above centroid
   - Legend: single-column vertical list, bottom-left inside map (like Colab)
@@ -42,6 +42,7 @@ ox.settings.requests_timeout = 25
 
 _STATIC        = os.path.join(os.path.dirname(__file__), "..", "static")
 _MTR_LOGO_PATH = os.path.join(_STATIC, "HK_MTR_logo.png")
+_BUS_ICON_PATH = os.path.join(_STATIC, "bus.png")
 
 FETCH_RADIUS  = 1500
 MAP_HALF_SIZE = 900
@@ -50,9 +51,9 @@ BUS_COUNT     = 10
 BUS_FETCH_R   = 1200
 MTR_RADIUS_M  = 2000
 LABEL_RADIUS  = 800
-FIG_SIZE      = 12      # back to 12 — landuse clipping keeps memory safe
+FIG_SIZE      = 12
 FIG_DPI       = 150
-BASEMAP_ZOOM  = 16      # zoom=16 matches image-2 crispness
+BASEMAP_ZOOM  = 16
 
 
 def _load_mtr():
@@ -75,6 +76,14 @@ if _MTR_IMG is not None:
         log.info("context: MTR thumb pre-built")
     except Exception as e:
         log.warning("context: MTR thumb failed (%s)", e)
+
+# Pre-load bus icon once at module load
+_BUS_IMG = None
+try:
+    _BUS_IMG = mpimg.imread(_BUS_ICON_PATH)
+    log.info("context: bus icon loaded")
+except Exception as e:
+    log.warning("context: bus icon missing (%s)", e)
 
 
 def _wrap(text, width=18):
@@ -298,7 +307,6 @@ def generate_context(
         for _, st in stations.iterrows():
             cx_ = float(st["_cx"])
             cy_ = float(st["_cy"])
-            # MTR logo — small, matches image-2 style
             if _MTR_THUMB is not None:
                 icon = OffsetImage(_MTR_THUMB, zoom=1.0)
                 icon.image.axes = ax
@@ -311,7 +319,6 @@ def generate_context(
                 ax.scatter([cx_], [cy_], s=300, c="#ED1D24",
                            edgecolors="white", linewidths=1.5, zorder=12)
 
-            # Station name — same compact white-box style as image-2
             nm = st.get("_name", "")
             if nm and isinstance(nm, str):
                 ax.text(cx_, cy_ + 120, _wrap(nm, 16),
@@ -322,13 +329,23 @@ def generate_context(
     gc.collect()
     log.info("context: stations done")
 
-    # Bus stops — small solid navy dots, exactly like image-2
+    # Bus stops — bus.png icon if available, fallback to navy dot
     log.info("context: plotting bus stops")
     if not bus_stops.empty:
         bxs = bus_stops["_cx"].tolist()
         bys = bus_stops["_cy"].tolist()
-        ax.scatter(bxs, bys, s=55, c="#0d47a1",
-                   edgecolors="white", linewidths=1.2, zorder=9)
+        if _BUS_IMG is not None:
+            for bx, by in zip(bxs, bys):
+                icon = OffsetImage(_BUS_IMG, zoom=0.028)
+                icon.image.axes = ax
+                ax.add_artist(AnnotationBbox(
+                    icon, (bx, by),
+                    frameon=False, zorder=9,
+                    box_alignment=(0.5, 0.5)
+                ))
+        else:
+            ax.scatter(bxs, bys, s=55, c="#0d47a1",
+                       edgecolors="white", linewidths=1.2, zorder=9)
     log.info("context: bus stops done")
 
     # Site polygon
@@ -338,7 +355,7 @@ def generate_context(
             color="white", weight="bold", ha="center", va="center",
             fontsize=9, zorder=12)
 
-    # Place labels — white rounded box, same as image-2
+    # Place labels — white rounded box
     offsets = [(0,35),(0,-35),(35,0),(-35,0),(25,25),(-25,25),
                (25,-25),(-25,-25),(0,50),(50,0),(-50,0),(0,-50)]
     placed = []
@@ -360,14 +377,13 @@ def generate_context(
                     zorder=12, clip_on=True)
             placed.append(p)
 
-    # Info box — top-left, exactly like image-2
+    # Info box — top-left
     ax.text(0.015, 0.985,
             f"Lot: {value}\nOZP Plan: {plan_no}\nZoning: {zone}\nSite Type: {s_type}\n",
             transform=ax.transAxes, ha="left", va="top", fontsize=9.2,
             bbox=dict(facecolor="white", edgecolor="black", pad=6))
 
     # Legend — single column vertical list, bottom-left inside map
-    # Exactly matches image-2 style
     ax.legend(
         handles=[
             mpatches.Patch(color="#f2c6a0", label="Residential"),
@@ -381,8 +397,8 @@ def generate_context(
                           markeredgewidth=1.2, markersize=7, label="Bus Stop"),
         ],
         loc="lower left",
-        bbox_to_anchor=(0.02, 0.02),   # inside map, bottom-left
-        ncol=1,                         # single column — matches image-2
+        bbox_to_anchor=(0.02, 0.02),
+        ncol=1,
         fontsize=8.5,
         framealpha=0.95,
         edgecolor="none",
