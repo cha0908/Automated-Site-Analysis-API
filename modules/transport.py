@@ -364,7 +364,7 @@ def generate_transport(
     log.info("[transport] Rendering...")
 
     # ── Figure ────────────────────────────────────────────────────────────────
-    fig, ax = plt.subplots(figsize=(18, 10))
+    fig, ax = plt.subplots(figsize=(22, 11))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
@@ -575,22 +575,37 @@ def generate_transport(
                           markeredgewidth=2, markersize=10, label="MTR Station"))
 
     if legend_handles:
+        # Place legend BELOW the axes so it never overlaps map content.
+        # bbox_to_anchor y<0 pushes it outside the plot area.
+        ncols = max(3, (len(legend_handles) + 2) // 3)  # always 3+ columns → wide & short
         legend = ax.legend(
             handles=legend_handles,
             handler_map=handler_map if handler_map else None,
-            loc="lower left", bbox_to_anchor=(0.02, 0.02),
-            frameon=True, facecolor="white", edgecolor="black",
-            fontsize=10, title_fontsize=10,
-            labelspacing=0.4, handlelength=1.8, handleheight=1.0,
-            borderpad=0.6, title="Legend",
+            loc="upper left",
+            bbox_to_anchor=(0.0, -0.04),
+            bbox_transform=ax.transAxes,
+            ncol=ncols,
+            frameon=True,
+            facecolor="white",
+            edgecolor="#333333",
+            fontsize=8.5,
+            title_fontsize=9,
+            labelspacing=0.3,
+            handlelength=1.6,
+            handleheight=0.9,
+            handletextpad=0.5,
+            columnspacing=1.2,
+            borderpad=0.5,
+            title="Legend",
         )
-        legend.get_frame().set_linewidth(2)
+        legend.get_frame().set_linewidth(1.5)
 
     ax.set_title(f"SITE ANALYSIS – Transportation ({data_type} {value})",
                  fontsize=18, weight="bold")
     ax.set_axis_off()
 
     buf = BytesIO()
+    fig.subplots_adjust(bottom=0.14)   # reserve space below axes for legend
     plt.savefig(buf, format="png", dpi=150,
                 bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
