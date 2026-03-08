@@ -336,40 +336,47 @@ def generate_pdf_report(data_type: str, value: str,
         "Noise Assessment",
     ]
 
-    # ── Submit all tasks in parallel ──────────────────────────
-    # run_analysis handles cache hits — cached modules return instantly.
-    logging.info(f"[report] Launching {len(tasks)} analyses in parallel...")
-    t0 = time.time()
-
-    _pool = ThreadPoolExecutor(max_workers=len(tasks))
-    future_to_idx = {
-        _pool.submit(run_analysis, data_type, value, atype, func, *args): i
-        for i, (atype, func, args) in enumerate(tasks)
-    }
-
-    # Wait up to 180s for all tasks — enough for 2 sequential slow modules
-    # if one cache-hits and another has a slow Overpass fetch.
-    done, pending = _cf.wait(future_to_idx, timeout=180,
-                              return_when=_cf.ALL_COMPLETED)
-
-    for f in pending:
-        idx = future_to_idx[f]
-        logging.warning(f"[report] '{tasks[idx][0]}' timed out — using blank image")
-
-    # CRITICAL: shutdown(wait=False) — do not block on zombie threads
-    _pool.shutdown(wait=False)
-
-    logging.info(f"[report] All analyses done in {time.time()-t0:.1f}s "
-                 f"({len(done)} completed, {len(pending)} timed out)")
-
-    # ── Collect results in order ──────────────────────────────
+    # ── Submit tasks in batches of 2 ──────────────────────────
+    # Render free tier has 512MB RAM. Running all 6 OSM modules concurrently
+    # exhausts memory and triggers an OOM kill. Batching to 2 concurrent
+    # workers keeps peak RAM safe while still being 3× faster than sequential.
+    # Cache hits return instantly so cached modules don't slow down batches.
+    BATCH_SIZE = 2
+    logging.info(f"[report] Launching {len(tasks)} analyses in batches of {BATCH_SIZE}...")
+    t0   = time.time()
     imgs = [None] * len(tasks)
-    for f, idx in future_to_idx.items():
-        if f in done:
-            try:
-                imgs[idx] = f.result()
-            except Exception as e:
-                logging.warning(f"[report] '{tasks[idx][0]}' failed: {e}")
+
+    for batch_start in range(0, len(tasks), BATCH_SIZE):
+        batch = list(enumerate(tasks))[batch_start:batch_start + BATCH_SIZE]
+        logging.info(f"[report] Batch {batch_start//BATCH_SIZE + 1}: "
+                     f"{[tasks[i][0] for i, _ in batch]}")
+
+        _pool = ThreadPoolExecutor(max_workers=BATCH_SIZE)
+        future_to_idx = {
+            _pool.submit(run_analysis, data_type, value, atype, func, *args): i
+            for i, (atype, func, args) in batch
+        }
+
+        done, pending = _cf.wait(future_to_idx, timeout=90,
+                                  return_when=_cf.ALL_COMPLETED)
+
+        for f in pending:
+            idx = future_to_idx[f]
+            logging.warning(f"[report] '{tasks[idx][0]}' timed out — using blank image")
+
+        # CRITICAL: shutdown(wait=False) — do not block on zombie Overpass threads
+        _pool.shutdown(wait=False)
+
+        for f, idx in future_to_idx.items():
+            if f in done:
+                try:
+                    imgs[idx] = f.result()
+                except Exception as e:
+                    logging.warning(f"[report] '{tasks[idx][0]}' failed: {e}")
+
+        import gc as _gc; _gc.collect()   # free memory between batches
+
+    logging.info(f"[report] All analyses done in {time.time()-t0:.1f}s")
 
     # ── Build PDF ─────────────────────────────────────────────
     buffer = BytesIO()
@@ -449,7 +456,7 @@ async def report(req: LocationRequest):
 # ── Health / root ─────────────────────────────────────────────
 @app.get("/")
 def root():
-    return {"status": "Automated Site Analysis API v3.0"}
+    return {"status": "Automated Site Analysis API v3.1"}
 
 @app.head("/")
 def root_head():
