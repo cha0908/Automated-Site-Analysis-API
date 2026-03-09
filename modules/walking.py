@@ -184,8 +184,8 @@ def generate_walking(data_type: str, value: str,
     cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
                    zoom=zoom_level, alpha=1)
 
-    # ── Roads AFTER basemap so they are visible ────────────────────────────────
-    roads.plot(ax=ax, linewidth=1.2, color="#555555", alpha=0.6, zorder=2)
+    # ── Roads AFTER basemap — light overlay so basemap remains readable ────────
+    roads.plot(ax=ax, linewidth=0.5, color="#888888", alpha=0.35, zorder=2)
     del roads
     gc.collect()
 
