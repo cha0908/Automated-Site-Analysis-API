@@ -1,5 +1,6 @@
 import osmnx as ox
 import geopandas as gpd
+import contextily as cx
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -21,6 +22,7 @@ VIEW_RADIUS  = 200    # outer edge of the view ring
 ARC_WIDTH    = 30     # arc ring thickness
 CITY_RADIUS  = 30     # only buildings within 30 m count for CITY view
 SECTOR_SIZE  = 20     # degrees per wedge
+COASTLINE_BUFFER_M = 2 # buffer coastline lines to polygon for sea-view area
 
 # ── Colour palette ─────────────────────────────────────────────────────────────
 COLOR_MAP = {
@@ -180,12 +182,18 @@ def _draw_panel(ax, center, site_geom, buildings, parks, water,
     ax.set_ylim(center.y - MAP_RADIUS, center.y + MAP_RADIUS)
     ax.set_aspect("equal")
 
+    # Basemap (same pattern as walking): extent set first so scope matches
+    view_extent = 2 * MAP_RADIUS
+    zoom_level = 17 if view_extent <= 500 else (16 if view_extent <= 900 else 15)
+    cx.add_basemap(ax, crs="EPSG:3857", source=cx.providers.CartoDB.PositronNoLabels,
+                   zoom=zoom_level, alpha=0.9)
+
     # ── background layers ────────────────────────────────────────────────────
     if len(parks):
         parks.plot(ax=ax, color="#b8c8a0", edgecolor="none", zorder=1)
     if len(water):
         water.plot(ax=ax, color="#6bb6d9", edgecolor="none", zorder=2)
-    buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)
+    # buildings.plot(ax=ax, color="#e3e3e3", edgecolor="none", zorder=3)  # commented: basemap shows roads/buildings
 
     # ── radial guide lines ───────────────────────────────────────────────────
     for angle in range(0, 360, SECTOR_SIZE):
@@ -198,16 +206,16 @@ def _draw_panel(ax, center, site_geom, buildings, parks, water,
         )
 
     # ── distance rings (80 / 160 / 200 m) ───────────────────────────────────
-    for d, label in [(80, "80 m"), (160, "160 m"), (200, "200 m")]:
-        gpd.GeoSeries([center.buffer(d)], crs=3857).boundary.plot(
-            ax=ax, linestyle=(0, (4, 4)), linewidth=1.2,
-            color="#555555", alpha=0.9, zorder=5,
-        )
-        ax.text(
-            center.x + d + 3, center.y, label,
-            fontsize=7, weight="bold", color="white",
-            bbox=dict(facecolor="black", edgecolor="none", pad=2), zorder=6,
-        )
+    # for d, label in [(80, "80 m"), (160, "160 m"), (200, "200 m")]:
+    #     gpd.GeoSeries([center.buffer(d)], crs=3857).boundary.plot(
+    #         ax=ax, linestyle=(0, (4, 4)), linewidth=1.2,
+    #         color="#555555", alpha=0.9, zorder=5,
+    #     )
+    #     ax.text(
+    #         center.x + d + 3, center.y, label,
+    #         fontsize=7, weight="bold", color="white",
+    #         bbox=dict(facecolor="black", edgecolor="none", pad=2), zorder=6,
+    #     )
 
     # ── view arcs + arc labels ───────────────────────────────────────────────
     for row in sector_rows:
@@ -238,9 +246,11 @@ def _draw_panel(ax, center, site_geom, buildings, parks, water,
             lx = center.x + label_r * np.cos(mid_rad)
             ly = center.y + label_r * np.sin(mid_rad)
 
-            # Tangent rotation so text follows the ring
-            rotation = mid_angle - 90
-            if 90 < mid_angle % 360 < 270:
+            # Tangent rotation so text follows the ring; flip if upside down (keep readable)
+            rotation = (mid_angle - 90) % 360
+            if rotation > 180:
+                rotation -= 360
+            if rotation > 90 or rotation <= -90:
                 rotation += 180
 
             ax.text(
@@ -359,10 +369,30 @@ def generate_view(data_type: str, value: str, BUILDING_DATA: gpd.GeoDataFrame,
         ).to_crs(3857)
         return gdf[gdf.intersects(analysis_circle)]
 
-    buildings = fetch_layer({"building": True})
+    # buildings = fetch_layer({"building": True})  # commented: use basemap for roads/buildings
+    buildings = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
     parks     = fetch_layer({"leisure": "park", "landuse": "grass",
                               "natural": "wood"})
-    water     = fetch_layer({"waterway": True, "natural": "water"})
+
+    # Water: one call for natural in [strait, bay, water, coastline]
+    gdf_all = fetch_layer({"natural": ["strait", "bay", "water", "coastline"]})
+    water_parts = []
+    if not gdf_all.empty and "geometry" in gdf_all.columns:
+        poly_mask = gdf_all.geometry.type.isin(["Polygon", "MultiPolygon"])
+        if poly_mask.any():
+            water_parts.append(gdf_all.loc[poly_mask, ["geometry"]].copy())
+        line_mask = gdf_all.geometry.type.isin(["LineString", "MultiLineString"])
+        if line_mask.any():
+            coast_lines = gdf_all.loc[line_mask]
+            buffered = coast_lines.geometry.buffer(COASTLINE_BUFFER_M)
+            water_parts.append(gpd.GeoDataFrame(geometry=buffered, crs=gdf_all.crs))
+    if water_parts:
+        water = gpd.GeoDataFrame(
+            geometry=pd.concat([p.geometry for p in water_parts], ignore_index=True),
+            crs=water_parts[0].crs,
+        )
+    else:
+        water = gpd.GeoDataFrame(geometry=[], crs="EPSG:3857")
 
     nearby = BUILDING_DATA[BUILDING_DATA.intersects(analysis_circle)].copy()
 

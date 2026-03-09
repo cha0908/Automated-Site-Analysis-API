@@ -30,7 +30,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 MAP_RADIUS           = 3000
 COLOR_ROADS          = "#e85d9e"
-COLOR_WATER          = "#6fa8dc"   # ← RESTORED: was removed in boss merge
+# COLOR_WATER          = "#6fa8dc"   # ← RESTORED: was removed in boss merge
 COLOR_BUILDINGS      = "#d6d6d6"
 COLOR_SITE           = "#FF0000"
 COLOR_LIGHT_RAIL     = "#D3A809"
@@ -186,7 +186,7 @@ def generate_transport(data_type: str, value: str,
     roads      = keep_lines(safe_fetch({"highway": ["motorway", "trunk", "primary", "secondary"]}))
     light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
     stations   = safe_fetch({"railway": "station"})
-    water      = safe_fetch({"natural": "water"})   # ← RESTORED
+    # water      = safe_fetch({"natural": "water"})   # ← RESTORED
     mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
 
     gc.collect()
@@ -241,8 +241,8 @@ def generate_transport(data_type: str, value: str,
 
     if not buildings.empty:
         buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-    if not water.empty:                                      # ← RESTORED
-        water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+    # if not water.empty:                                      # ← RESTORED
+    #     water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
     if not roads.empty:
         roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
 

@@ -174,7 +174,7 @@ def generate_walking(data_type: str, value: str,
         })
 
     # ── Plot — use lower DPI to save RAM during rendering ─────
-    fig, ax = plt.subplots(figsize=(16.15, 12))   # slightly smaller figure
+    fig, ax = plt.subplots(figsize=(20,15)) # slightly smaller figure
 
     roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
     del roads
@@ -233,7 +233,7 @@ def generate_walking(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=100)
+    plt.savefig(buf, format="png", dpi=500)
     plt.close(fig)
     gc.collect()
     return buf
