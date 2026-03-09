@@ -370,7 +370,7 @@ def generate_transport(
     try:
         cx.add_basemap(ax, crs="EPSG:3857",
                        source=cx.providers.CartoDB.PositronNoLabels,
-                       zoom=14, alpha=0.5)
+                       zoom=14, alpha=1)
     except Exception as e:
         log.warning(f"[transport] basemap failed: {e}")
 
