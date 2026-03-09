@@ -1,9 +1,25 @@
+"""
+modules/transport.py
+──────────────────────────────────────────────────────────────────────────────
+Fixes applied (v2):
+  1. _fetch_mtr_routes: tag each batch with _src before concat so _osmid
+     dedup no longer drops rail rows that share IDs with subway rows.
+  2. MTR lines drawn WITHOUT gpd.clip() — matplotlib axis limits handle the
+     visual crop, so lines that start/end outside the frame are not truncated.
+  3. MTR zorder raised above roads (roads zorder=3, MTR white=6, colour=7).
+  4. Fetch radius expanded to 3500 m so lines entering from the edge are
+     fully captured before the axis crops them.
+  5. unary_union per colour group → single continuous geometry for labelling.
+Legend: single-column vertical list, bottom-left inside map (matches context.py)
+"""
+
 from typing import Optional, List
 import matplotlib
 matplotlib.use("Agg")
 
 import os
 import gc
+import logging
 import osmnx as ox
 import geopandas as gpd
 import contextily as cx
@@ -13,52 +29,58 @@ import matplotlib.patches as mpatches
 import matplotlib.lines as mlines
 import matplotlib.legend_handler as lh
 import numpy as np
+import pandas as pd
 
-from shapely.geometry import Point, box
+from shapely.geometry import Point, box, MultiLineString, LineString
+from shapely.ops import unary_union as shapely_union
 from io import BytesIO
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 from PIL import Image
 
-# IMPORT UNIVERSAL RESOLVER
 from modules.resolver import resolve_location, get_lot_boundary
 
-ox.settings.use_cache   = True
-ox.settings.log_console = False
+ox.settings.use_cache        = True
+ox.settings.log_console      = False
+ox.settings.requests_timeout = 25
 
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
-MAP_RADIUS           = 3000
-COLOR_ROADS          = "#e85d9e"
-# COLOR_WATER          = "#6fa8dc"   # ← RESTORED: was removed in boss merge
-COLOR_BUILDINGS      = "#d6d6d6"
-COLOR_SITE           = "#FF0000"
-COLOR_LIGHT_RAIL     = "#D3A809"
+log = logging.getLogger(__name__)
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+MAP_RADIUS           = 2500
+FETCH_RADIUS         = 3500
+HALF_W               = 1900
+HALF_H               = 1100
 STATION_MIN_DISTANCE = 250
 STATION_LOGO_ZOOM    = 0.055
 
-
-# ============================================================
-# MTR LINE COLOR MAP
-# ============================================================
-
-MTR_LINE_COLORS = {
-    "island":              "#007DC5",
-    "kwun tong":           "#00AB4E",
-    "tsuen wan":           "#ED1D24",
-    "tseung kwan o":       "#7D499D",
-    "tung chung":          "#F7943E",
-    "east rail":           "#5EB6E4",
-    "tuen ma":             "#923011",
-    "south island":        "#BAC429",
-    "airport express":     "#888B8D",
-    "lantau and airport":  "#888B8D",
-    "guangzhoushen":       "#007DC5",
-}
-
+COLOR_ROADS      = "#e85d9e"
+COLOR_BUILDINGS  = "#d6d6d6"
+COLOR_SITE       = "#FF0000"
+COLOR_LIGHT_RAIL = "#D3A809"
 DEFAULT_MTR_COLOR = "#3f78b5"
 
+# ── MTR colour map ─────────────────────────────────────────────────────────────
+MTR_LINE_COLORS = [
+    ("south island",       "#BAC429"),
+    ("island",             "#007DC5"),
+    ("kwun tong",          "#00AB4E"),
+    ("tsuen wan",          "#ED1D24"),
+    ("tseung kwan o",      "#7D499D"),
+    ("tung chung",         "#F7943E"),
+    ("east rail",          "#5EB6E4"),
+    ("tuen ma",            "#923011"),
+    ("airport express",    "#888B8D"),
+    ("lantau and airport", "#888B8D"),
+    ("guangzhou",          "#888B8D"),
+    ("express rail",       "#888B8D"),
+]
+
 MTR_LEGEND_LINES = [
+    ("south island",       "#BAC429", "South Island Line"),
     ("island",             "#007DC5", "Island Line"),
     ("kwun tong",          "#00AB4E", "Kwun Tong Line"),
     ("tsuen wan",          "#ED1D24", "Tsuen Wan Line"),
@@ -66,24 +88,38 @@ MTR_LEGEND_LINES = [
     ("tung chung",         "#F7943E", "Tung Chung Line"),
     ("east rail",          "#5EB6E4", "East Rail Line"),
     ("tuen ma",            "#923011", "Tuen Ma Line"),
-    ("south island",       "#BAC429", "South Island Line"),
     ("airport express",    "#888B8D", "Airport Express"),
     ("lantau and airport", "#888B8D", "Airport Express"),
-    ("guangzhoushen",      "#007DC5", "Express Rail Link"),
+    ("guangzhou",          "#888B8D", "Express Rail Link"),
+    ("express rail",       "#888B8D", "Express Rail Link"),
 ]
+
+_LABEL_REMAP = {
+    "LANTAU AND AIRPORT": "AIRPORT EXPRESS",
+    "GUANGZHOU":          "EXPRESS RAIL LINK",
+    "EXPRESS RAIL":       "EXPRESS RAIL LINK",
+}
 
 
 def get_mtr_color(name: str) -> str:
-    name_lower = name.lower()
-    for key, color in MTR_LINE_COLORS.items():
-        if key in name_lower:
+    nl = name.lower()
+    for key, color in MTR_LINE_COLORS:
+        if key in nl:
             return color
     return DEFAULT_MTR_COLOR
 
 
-# ============================================================
-# LOAD MTR LOGO
-# ============================================================
+def _make_label(name: str) -> str:
+    upper = name.upper().strip()
+    if upper.startswith("MTR "):
+        upper = upper[4:]
+    for fragment, replacement in _LABEL_REMAP.items():
+        if fragment in upper:
+            return f"MTR {replacement}"
+    return f"MTR {upper}"
+
+
+# ── MTR logo ──────────────────────────────────────────────────────────────────
 
 _STATIC_DIR    = os.path.join(os.path.dirname(__file__), "..", "static")
 _MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
@@ -91,435 +127,462 @@ _MTR_LOGO_PATH = os.path.join(_STATIC_DIR, "HK_MTR_logo.png")
 try:
     _mtr_img        = mpimg.imread(_MTR_LOGO_PATH)
     MTR_LOGO_LOADED = True
-    print(f"MTR logo loaded: {_MTR_LOGO_PATH}")
-except Exception as e:
+    log.info("[transport] MTR logo loaded")
+except Exception as _e:
     _mtr_img        = None
     MTR_LOGO_LOADED = False
-    print(f"MTR logo not found ({e}). Using drawn roundel fallback.")
+    log.warning(f"[transport] MTR logo not found: {_e}")
 
 
-# ============================================================
-# FALLBACK ROUNDEL
-# ============================================================
-
-def _draw_roundel_fallback(ax, x, y, size=60, color="#ED1D24", zorder=9):
+def _draw_roundel(ax, x, y, size=60, color="#ED1D24", zorder=9):
     ax.add_patch(plt.Circle((x, y), size, color=color, zorder=zorder))
-    bar_w = size * 2.0
-    bar_h = size * 0.55
-    ax.add_patch(plt.Rectangle(
-        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
-        color="white", zorder=zorder + 1))
-    ax.add_patch(plt.Circle((x, y), size * 0.55,
-                             color="white", zorder=zorder + 2))
-    ax.add_patch(plt.Rectangle(
-        (x - bar_w/2, y - bar_h/2), bar_w, bar_h,
-        color=color, zorder=zorder + 3))
+    bw, bh = size * 2.0, size * 0.55
+    ax.add_patch(plt.Rectangle((x - bw/2, y - bh/2), bw, bh,
+                                color="white", zorder=zorder + 1))
+    ax.add_patch(plt.Circle((x, y), size * 0.55, color="white", zorder=zorder + 2))
+    ax.add_patch(plt.Rectangle((x - bw/2, y - bh/2), bw, bh,
+                                color=color, zorder=zorder + 3))
 
 
-# ============================================================
-# DRAW STATION
-# ============================================================
-
-def _draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM,
-                  fallback_color="#ED1D24", zorder=9):
+def draw_station(ax, x, y, zoom=STATION_LOGO_ZOOM, fallback="#ED1D24", zorder=9):
     if MTR_LOGO_LOADED and _mtr_img is not None:
         icon = OffsetImage(_mtr_img, zoom=zoom)
         icon.image.axes = ax
-        ab = AnnotationBbox(
-            icon, (x, y),
-            frameon=False,
-            zorder=zorder,
-            box_alignment=(0.5, 0.5)
-        )
+        ab = AnnotationBbox(icon, (x, y), frameon=False,
+                            zorder=zorder, box_alignment=(0.5, 0.5))
         ax.add_artist(ab)
     else:
-        _draw_roundel_fallback(ax, x, y, size=60,
-                               color=fallback_color, zorder=zorder)
+        _draw_roundel(ax, x, y, size=60, color=fallback, zorder=zorder)
 
 
-# ============================================================
-# MAIN GENERATOR
-# ============================================================
+# ── Geometry helpers ──────────────────────────────────────────────────────────
 
-def generate_transport(data_type: str, value: str,
-                       radius_m: Optional[int] = None,
-                       lon: float = None, lat: float = None,
-                       lot_ids: List[str] = None,
-                       extents: List[dict] = None):
+def _extract_lines(geom):
+    if geom is None or geom.is_empty:
+        return None
+    gt = geom.geom_type
+    if gt in ("LineString", "MultiLineString"):
+        return geom
+    if hasattr(geom, "geoms"):
+        lines = []
+        for part in geom.geoms:
+            ex = _extract_lines(part)
+            if ex is None:
+                continue
+            if ex.geom_type == "MultiLineString":
+                lines.extend(list(ex.geoms))
+            elif ex.geom_type == "LineString":
+                lines.append(ex)
+        if lines:
+            return MultiLineString(lines) if len(lines) > 1 else lines[0]
+    return None
 
+
+def _to_line_gdf(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.empty:
+        return gdf.copy()
+    rows = []
+    for _, row in gdf.iterrows():
+        lg = _extract_lines(row.geometry)
+        if lg is not None:
+            r = row.copy()
+            r.geometry = lg
+            rows.append(r)
+    if not rows:
+        return gpd.GeoDataFrame(geometry=[], crs=gdf.crs)
+    return gpd.GeoDataFrame(rows, crs=gdf.crs).reset_index(drop=True)
+
+
+def _keep_lines(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.empty:
+        return gdf.copy()
+    return gdf[gdf.geometry.geom_type.isin(
+        ["LineString", "MultiLineString"])].copy().reset_index(drop=True)
+
+
+# ── Safe fetch ────────────────────────────────────────────────────────────────
+
+def _safe_fetch(lat: float, lon: float, dist: int, tags: dict,
+                timeout: int = 25) -> gpd.GeoDataFrame:
+    try:
+        old_t = ox.settings.requests_timeout
+        ox.settings.requests_timeout = timeout
+        gdf = ox.features_from_point((lat, lon), dist=dist, tags=tags)
+        ox.settings.requests_timeout = old_t
+        if gdf is not None and not gdf.empty:
+            result = gdf.to_crs(3857)
+            del gdf
+            return result
+    except Exception as e:
+        log.debug(f"[transport] fetch failed {tags}: {e}")
+    return gpd.GeoDataFrame(geometry=[], crs=3857)
+
+
+def _flatten(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
+    if gdf.empty:
+        return gdf.copy()
+    out = gdf.copy()
+    if isinstance(out.index, pd.MultiIndex):
+        try:
+            out["_osmid"] = out.index.get_level_values("osmid")
+        except KeyError:
+            out["_osmid"] = range(len(out))
+    else:
+        out["_osmid"] = out.index.astype(str)
+    return out.reset_index(drop=True)
+
+
+def _clean_name(val) -> Optional[str]:
+    if val is None or isinstance(val, float):
+        return None
+    if isinstance(val, (list, tuple)):
+        val = next((v for v in val if v is not None), None)
+    if hasattr(val, "iloc"):
+        val = val.iloc[0] if len(val) else None
+    if isinstance(val, dict):
+        val = val.get("name") or next(iter(val.values()), None)
+    if not isinstance(val, str):
+        return None
+    ascii_only = "".join(c for c in val if ord(c) < 128).strip()
+    return ascii_only if ascii_only else None
+
+
+# ── MTR route fetch ───────────────────────────────────────────────────────────
+
+def _fetch_mtr_routes(lat: float, lon: float, dist: int) -> gpd.GeoDataFrame:
+    frames = []
+
+    for src_tag, tags in [("rail",   {"railway": "rail"}),
+                           ("subway", {"railway": "subway"})]:
+        try:
+            raw = _safe_fetch(lat, lon, dist, tags, timeout=30)
+            if raw.empty:
+                continue
+            flat = _flatten(raw)
+            del raw
+            gc.collect()
+
+            flat["_src"] = src_tag
+
+            log.info(f"[transport] MTR {tags}: {len(flat)} rows "
+                     f"types={flat.geometry.geom_type.value_counts().to_dict()}")
+
+            line_gdf = _to_line_gdf(flat)
+            del flat
+            gc.collect()
+
+            if not line_gdf.empty:
+                if "name" in line_gdf.columns:
+                    names = line_gdf["name"].apply(_clean_name).dropna().unique().tolist()
+                    log.info(f"[transport] MTR names {tags}: {names[:10]}")
+                frames.append(line_gdf)
+
+        except Exception as e:
+            log.warning(f"[transport] MTR fetch error {tags}: {e}")
+            gc.collect()
+
+    if not frames:
+        return gpd.GeoDataFrame(geometry=[], crs=3857)
+
+    try:
+        combined = pd.concat(frames, ignore_index=True)
+        del frames
+        gc.collect()
+
+        if "_osmid" in combined.columns and "_src" in combined.columns:
+            combined["_dedup_key"] = combined["_osmid"].astype(str) + "_" + combined["_src"]
+            combined = (combined
+                        .drop_duplicates(subset=["_dedup_key"])
+                        .drop(columns=["_dedup_key", "_osmid", "_src"])
+                        .reset_index(drop=True))
+        log.info(f"[transport] MTR combined: {len(combined)} rows")
+        return gpd.GeoDataFrame(combined, crs=3857)
+
+    except Exception as e:
+        log.warning(f"[transport] MTR concat error: {e}")
+        return gpd.GeoDataFrame(geometry=[], crs=3857)
+
+
+# ── Main generator ────────────────────────────────────────────────────────────
+
+def generate_transport(
+    data_type: str,
+    value: str,
+    lon: float = None,
+    lat: float = None,
+    lot_ids: List[str] = None,
+    extents: List[dict] = None,
+    radius_m: Optional[int] = None,
+):
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
-    r = radius_m if radius_m is not None else MAP_RADIUS
-    lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
+    fetch_r  = radius_m if radius_m else FETCH_RADIUS
+    log.info(f"[transport] {data_type} {value} → lon={lon:.5f} lat={lat:.5f} r={fetch_r}m")
 
-    if lot_gdf is not None:
+    # ── Site polygon ──────────────────────────────────────────────────────────
+    try:
+        lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
+    except Exception as e:
+        log.warning(f"[transport] get_lot_boundary: {e}")
+        lot_gdf = None
+
+    if lot_gdf is not None and not lot_gdf.empty:
         site_geom  = lot_gdf.geometry.iloc[0]
         site_gdf   = lot_gdf
         site_point = site_geom.centroid
     else:
-        site_point = gpd.GeoSeries(
-            [Point(lon, lat)], crs=4326
-        ).to_crs(3857).iloc[0]
+        site_point = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
+        site_geom  = site_point.buffer(120)
+        site_gdf   = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
 
-    # --------------------------------------------------------
-    # SAFE FETCH
-    # --------------------------------------------------------
+    # ── Map extent ────────────────────────────────────────────────────────────
+    xmin = site_point.x - HALF_W
+    xmax = site_point.x + HALF_W
+    ymin = site_point.y - HALF_H
+    ymax = site_point.y + HALF_H
 
-    def safe_fetch(tags):
-        try:
-            gdf = ox.features_from_point((lat, lon), dist=r, tags=tags)
-            if not gdf.empty:
-                return gdf.to_crs(3857)
-            return gpd.GeoDataFrame(geometry=[], crs=3857)
-        except:
-            return gpd.GeoDataFrame(geometry=[], crs=3857)
-
-    def keep_lines(gdf):
-        if not gdf.empty:
-            return gdf[gdf.geometry.type.isin(["LineString", "MultiLineString"])]
-        return gpd.GeoDataFrame(geometry=[], crs=3857)
-
-    # --------------------------------------------------------
-    # FETCH DATA  ← water fetch RESTORED (removed in boss merge)
-    # --------------------------------------------------------
-
-    buildings  = safe_fetch({"building": True})
-    roads      = keep_lines(safe_fetch({"highway": ["motorway", "trunk", "primary", "secondary"]}))
-    light_rail = keep_lines(safe_fetch({"railway": "light_rail"}))
-    stations   = safe_fetch({"railway": "station"})
-    # water      = safe_fetch({"natural": "water"})   # ← RESTORED
-    mtr_routes = keep_lines(safe_fetch({"railway": ["rail", "subway"]}))
-
+    # ── Fetch layers ──────────────────────────────────────────────────────────
+    log.info("[transport] Fetching roads...")
+    roads = _keep_lines(_flatten(_safe_fetch(lat, lon, fetch_r, {
+        "highway": ["motorway", "trunk", "primary", "secondary", "tertiary"],
+    }, timeout=25)))
     gc.collect()
 
-    # --------------------------------------------------------
-    # SITE POLYGON
-    # --------------------------------------------------------
+    log.info("[transport] Fetching MTR routes...")
+    mtr_routes = _fetch_mtr_routes(lat, lon, fetch_r)
+    gc.collect()
 
-    if lot_gdf is None:
-        if not buildings.empty:
-            distances   = buildings.geometry.distance(site_point)
-            nearest_idx = distances.idxmin()
-            site_geom   = buildings.loc[nearest_idx, "geometry"]
-        else:
-            site_geom = site_point.buffer(40)
-        site_gdf = gpd.GeoDataFrame(geometry=[site_geom], crs=3857)
+    log.info("[transport] Fetching stations...")
+    stations = _flatten(_safe_fetch(lat, lon, fetch_r, {"railway": "station"}, timeout=25))
+    gc.collect()
 
-    # --------------------------------------------------------
-    # MAP EXTENT — defined ONCE here, not duplicated below
-    # --------------------------------------------------------
+    log.info("[transport] Rendering...")
 
-    xmin = site_point.x - 1600
-    xmax = site_point.x + 2200
-    ymin = site_point.y - 1100
-    ymax = site_point.y + 1100
-
-    clip_box = box(xmin, ymin, xmax, ymax)
-    clip_gdf = gpd.GeoDataFrame(geometry=[clip_box], crs=3857)
-
-    # --------------------------------------------------------
-    # PLOT SETUP
-    # CRITICAL: set xlim/ylim BEFORE cx.add_basemap so
-    # contextily fetches tiles at the correct location and zoom.
-    # --------------------------------------------------------
-
-    fig, ax = plt.subplots(figsize=(18, 10))
+    # ── Figure ────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(22, 11))
     fig.patch.set_facecolor("#f4f4f4")
     ax.set_facecolor("#f4f4f4")
 
-    # Step 1 — lock extent FIRST
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
 
-    # Step 2 — basemap uses locked extent to fetch correct tiles
-    cx.add_basemap(ax, crs="EPSG:3857",
-                   source=cx.providers.CartoDB.Positron,
-                   zoom=15, alpha=0.5)
+    try:
+        cx.add_basemap(ax, crs="EPSG:3857",
+                       source=cx.providers.CartoDB.PositronNoLabels,
+                       zoom=14, alpha=0.5)
+    except Exception as e:
+        log.warning(f"[transport] basemap failed: {e}")
 
-    # --------------------------------------------------------
-    # BASE LAYERS
-    # --------------------------------------------------------
-
-    if not buildings.empty:
-        buildings.plot(ax=ax, color=COLOR_BUILDINGS, alpha=0.5, zorder=1)
-    # if not water.empty:                                      # ← RESTORED
-    #     water.plot(ax=ax, color=COLOR_WATER, alpha=0.8, zorder=2)
+    # ── Roads ─────────────────────────────────────────────────────────────────
     if not roads.empty:
-        roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.2, zorder=3)
+        try:
+            roads.plot(ax=ax, color=COLOR_ROADS, linewidth=2.0, zorder=3, alpha=0.85)
+        except Exception as e:
+            log.warning(f"[transport] roads render: {e}")
+    del roads
+    gc.collect()
 
-    # --------------------------------------------------------
-    # MTR ROUTES — per-line coloring
-    # --------------------------------------------------------
-
-    lines_on_map = {}
+    # ── MTR routes ────────────────────────────────────────────────────────────
+    lines_on_map: dict = {}
 
     if not mtr_routes.empty:
+        try:
+            log.info(f"[transport] mtr_routes total: {len(mtr_routes)} rows")
 
-        mtr_visible = gpd.clip(mtr_routes, clip_gdf)
+            name_col = None
+            for c in ["name", "name:en"]:
+                if c in mtr_routes.columns and mtr_routes[c].apply(_clean_name).notna().any():
+                    name_col = c
+                    break
 
-        if not mtr_visible.empty:
-
-            placed_positions = []
-            name_col = "name" if "name" in mtr_visible.columns else None
-
-            if name_col:
-                unique_names = mtr_visible[name_col].dropna().unique()
-
-                for name in unique_names:
-                    clean_name = ''.join(c for c in name if ord(c) < 128).strip()
-                    if clean_name == "":
-                        continue
-
-                    line_color = get_mtr_color(clean_name)
-                    subset     = mtr_visible[mtr_visible[name_col] == name]
-
-                    subset.plot(ax=ax, color="white",    linewidth=8,   zorder=4)
-                    subset.plot(ax=ax, color=line_color, linewidth=4.5, zorder=5)
-
-                    if line_color not in lines_on_map:
-                        official_label = clean_name.title()
-                        for key, c, label in MTR_LEGEND_LINES:
-                            if key in clean_name.lower():
-                                official_label = label
-                                break
-                        lines_on_map[line_color] = official_label
-
-                    merged = subset.union_all()
-                    if merged.length < 600:
-                        continue
-
-                    midpoint = merged.interpolate(0.5, normalized=True)
-                    offset_y = 0
-                    for pt in placed_positions:
-                        if midpoint.distance(pt) < 500:
-                            offset_y += 150
-
-                    new_point = Point(midpoint.x, midpoint.y + offset_y)
-                    placed_positions.append(new_point)
-
-                    if xmin <= new_point.x <= xmax and ymin <= new_point.y <= ymax:
-                        ax.text(
-                            new_point.x, new_point.y,
-                            f"MTR {clean_name.upper()}",
-                            fontsize=9, weight="bold",
-                            color=line_color,
-                            ha="center", va="center",
-                            zorder=12,
-                            bbox=dict(facecolor="white", edgecolor="none",
-                                      alpha=0.85, pad=2)
-                        )
-
-                unnamed = mtr_visible[mtr_visible[name_col].isna()]
-                if not unnamed.empty:
-                    unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
-                    unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
-
+            if name_col is None:
+                mtr_routes.plot(ax=ax, color="white",           linewidth=8,   zorder=6)
+                mtr_routes.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=7)
+                lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
             else:
-                mtr_visible.plot(ax=ax, color="white",           linewidth=8,   zorder=4)
-                mtr_visible.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=5)
+                mtr_routes        = mtr_routes.copy()
+                mtr_routes["_cn"] = mtr_routes[name_col].apply(_clean_name)
+                named   = mtr_routes[mtr_routes["_cn"].notna()]
+                unnamed = mtr_routes[mtr_routes["_cn"].isna()]
 
-    # --------------------------------------------------------
-    # LIGHT RAIL
-    # --------------------------------------------------------
+                placed_lbl = []
 
-    if not light_rail.empty:
-        light_rail.plot(ax=ax, color="white",          linewidth=6,   zorder=4)
-        light_rail.plot(ax=ax, color=COLOR_LIGHT_RAIL, linewidth=3.5, zorder=5)
+                for cname, grp in named.groupby("_cn", sort=False):
+                    lc = get_mtr_color(cname)
+                    log.info(f"[transport] Drawing '{cname}' → color={lc} n={len(grp)}")
 
-    # --------------------------------------------------------
-    # STATIONS
-    # --------------------------------------------------------
+                    grp.plot(ax=ax, color="white", linewidth=8,   zorder=6)
+                    grp.plot(ax=ax, color=lc,      linewidth=4.5, zorder=7)
 
-    if not stations.empty:
-        station_pts = stations.copy()
-        station_pts["geometry"] = station_pts.centroid
+                    if lc not in lines_on_map:
+                        official = cname.title()
+                        for k, _c, lbl in MTR_LEGEND_LINES:
+                            if k in cname.lower():
+                                official = lbl
+                                break
+                        lines_on_map[lc] = official
 
-        station_pts = station_pts[
-            (station_pts.geometry.x >= xmin) & (station_pts.geometry.x <= xmax) &
-            (station_pts.geometry.y >= ymin) & (station_pts.geometry.y <= ymax)
-        ]
-
-        placed_station_positions = []
-
-        for _, row in station_pts.iterrows():
-            sx, sy     = row.geometry.x, row.geometry.y
-            current_pt = Point(sx, sy)
-
-            too_close = any(
-                current_pt.distance(p) < STATION_MIN_DISTANCE
-                for p in placed_station_positions
-            )
-            if too_close:
-                continue
-
-            placed_station_positions.append(current_pt)
-
-            fallback_color = "#ED1D24"
-            name_val = row.get("name", None)
-            if isinstance(name_val, str) and name_val.strip():
-                c = get_mtr_color(name_val)
-                if c != DEFAULT_MTR_COLOR:
-                    fallback_color = c
-                elif not mtr_routes.empty and "name" in mtr_routes.columns:
-                    pt       = Point(sx, sy)
-                    min_dist = float("inf")
-                    for lname, grp in mtr_routes.groupby("name"):
-                        if not isinstance(lname, str):
+                    try:
+                        merged = shapely_union(grp.geometry.tolist())
+                        if merged is None or merged.is_empty or merged.length < 400:
                             continue
-                        d = grp.union_all().distance(pt)
-                        if d < min_dist:
-                            min_dist       = d
-                            fallback_color = get_mtr_color(lname)
+                        mid   = merged.interpolate(0.5, normalized=True)
+                        if not (xmin <= mid.x <= xmax and ymin <= mid.y <= ymax):
+                            continue
+                        off_y = sum(150 for pp in placed_lbl if mid.distance(pp) < 500)
+                        lp    = Point(mid.x, mid.y + off_y)
+                        placed_lbl.append(lp)
+                        ax.text(lp.x, lp.y, _make_label(cname),
+                                fontsize=9, weight="bold", color=lc,
+                                ha="center", va="center", zorder=12,
+                                bbox=dict(facecolor="white", edgecolor="none",
+                                          alpha=0.85, pad=2))
+                    except Exception as le:
+                        log.debug(f"[transport] label '{cname}': {le}")
 
-            _draw_station(ax, sx, sy,
-                          zoom=STATION_LOGO_ZOOM,
-                          fallback_color=fallback_color,
-                          zorder=9)
+                if not unnamed.empty and named.empty:
+                    unnamed.plot(ax=ax, color="white",           linewidth=8,   zorder=6)
+                    unnamed.plot(ax=ax, color=DEFAULT_MTR_COLOR, linewidth=4.5, zorder=7)
+                    lines_on_map[DEFAULT_MTR_COLOR] = "MTR"
 
-            if isinstance(name_val, str) and name_val.strip():
-                display_name = ''.join(c for c in name_val if ord(c) < 128).strip()
-                if display_name:
-                    ax.text(
-                        sx, sy - 130,
-                        display_name,
-                        fontsize=7.5, weight="bold",
-                        ha="center", va="top",
-                        color="#333333",
-                        zorder=10,
-                        bbox=dict(facecolor="white", edgecolor="none",
-                                  alpha=0.7, pad=1.5)
-                    )
+        except Exception as e:
+            log.warning(f"[transport] MTR render error: {e}")
 
-    # --------------------------------------------------------
-    # SITE
-    # --------------------------------------------------------
+    del mtr_routes
+    gc.collect()
 
-    site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="none", zorder=13)
+    # ── Stations ──────────────────────────────────────────────────────────────
+    if not stations.empty:
+        try:
+            stns        = stations.copy()
+            stns["_cx"] = stns.geometry.centroid.x
+            stns["_cy"] = stns.geometry.centroid.y
+            in_view = stns[
+                (stns["_cx"] >= xmin) & (stns["_cx"] <= xmax) &
+                (stns["_cy"] >= ymin) & (stns["_cy"] <= ymax)
+            ]
+            placed_pts = []
+            for _, row in in_view.iterrows():
+                sx, sy = row["_cx"], row["_cy"]
+                pt = Point(sx, sy)
+                if any(pt.distance(p) < STATION_MIN_DISTANCE for p in placed_pts):
+                    continue
+                placed_pts.append(pt)
+                fb     = "#ED1D24"
+                name_s = _clean_name(row.get("name"))
+                if name_s:
+                    c = get_mtr_color(name_s)
+                    if c != DEFAULT_MTR_COLOR:
+                        fb = c
+                draw_station(ax, sx, sy, zoom=STATION_LOGO_ZOOM, fallback=fb, zorder=9)
+                if name_s:
+                    ax.text(sx, sy - 130, name_s,
+                            fontsize=7.5, weight="bold",
+                            ha="center", va="top", color="#333333", zorder=10,
+                            bbox=dict(facecolor="white", edgecolor="none",
+                                      alpha=0.75, pad=1.5))
+        except Exception as e:
+            log.warning(f"[transport] Station render: {e}")
+    del stations
+    gc.collect()
 
-    centroid = site_geom.centroid
-    ax.text(
-        centroid.x, centroid.y - 120,
-        "SITE",
-        fontsize=14, weight="bold",
-        ha="center", zorder=14
-    )
+    # ── Site ──────────────────────────────────────────────────────────────────
+    try:
+        site_gdf.plot(ax=ax, facecolor=COLOR_SITE, edgecolor="white",
+                      linewidth=2.5, zorder=13)
+        centroid = site_geom.centroid
+        ax.text(centroid.x, centroid.y - 160, "SITE",
+                fontsize=14, weight="bold", color="black",
+                ha="center", va="top", zorder=14,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.85, pad=3))
+    except Exception as e:
+        log.warning(f"[transport] Site render: {e}")
 
-    # --------------------------------------------------------
-    # NORTH ARROW
-    # --------------------------------------------------------
-
-    ax.annotate(
-        '',
-        xy=(0.07, 0.85), xytext=(0.07, 0.80),
-        xycoords=ax.transAxes,
-        arrowprops=dict(facecolor='black', width=1.5, headwidth=8, headlength=10)
-    )
+    # ── North arrow ───────────────────────────────────────────────────────────
+    ax.annotate("", xy=(0.07, 0.85), xytext=(0.07, 0.80),
+                xycoords=ax.transAxes,
+                arrowprops=dict(facecolor="black", width=1.5,
+                                headwidth=8, headlength=10))
     ax.text(0.07, 0.86, "N", transform=ax.transAxes,
-            ha='center', va='bottom', fontsize=12)
-
-    # --------------------------------------------------------
-    # RE-LOCK EXTENT — geopandas .plot() resets limits after each call
-    # --------------------------------------------------------
+            ha="center", va="bottom", fontsize=12, weight="bold")
 
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
 
-    # --------------------------------------------------------
-    # LEGEND
-    # --------------------------------------------------------
-
+    # ── Legend — single-column vertical, bottom-left inside map ───────────────
     legend_handles = []
 
-    legend_handles.append(
-        mlines.Line2D([], [], color=COLOR_LIGHT_RAIL, linewidth=4, label="Light Rail")
-    )
-
-    seen_colors_legend = set()
-    for key, color, label in MTR_LEGEND_LINES:
-        if color in lines_on_map and color not in seen_colors_legend:
+    seen_lc = set()
+    for _, color, label in MTR_LEGEND_LINES:
+        if color in lines_on_map and color not in seen_lc:
             legend_handles.append(
-                mlines.Line2D([], [], color=color, linewidth=4, label=label)
-            )
-            seen_colors_legend.add(color)
+                mlines.Line2D([], [], color=color, linewidth=4, label=label))
+            seen_lc.add(color)
+
+    if DEFAULT_MTR_COLOR in lines_on_map and not seen_lc:
+        legend_handles.append(
+            mlines.Line2D([], [], color=DEFAULT_MTR_COLOR, linewidth=4, label="MTR"))
 
     legend_handles.append(
-        mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation")
-    )
+        mlines.Line2D([], [], color=COLOR_ROADS, linewidth=4, label="Vehicle Circulation"))
     legend_handles.append(
-        mpatches.Patch(facecolor=COLOR_SITE, label="Site")
-    )
+        mpatches.Patch(facecolor=COLOR_SITE, label="Site"))
 
+    handler_map = {}
     if MTR_LOGO_LOADED and _mtr_img is not None:
-        pil_thumb = Image.fromarray(
-            ((_mtr_img * 255).astype(np.uint8)
-             if _mtr_img.dtype != np.uint8 else _mtr_img)
-        ).resize((20, 20), Image.LANCZOS)
-        thumb_arr = np.array(pil_thumb)
+        try:
+            raw_arr = (_mtr_img * 255).astype(np.uint8) if _mtr_img.dtype != np.uint8 else _mtr_img
+            thumb   = np.array(Image.fromarray(raw_arr).resize((20, 20), Image.LANCZOS))
 
-        class LogoHandler(mlines.Line2D):
-            pass
+            class _LogoHandle(mlines.Line2D):
+                pass
 
-        class HandlerLogo(lh.HandlerBase):
-            def create_artists(self, legend, orig_handle,
-                               xdescent, ydescent, width, height, fontsize, trans):
-                ox_pos = xdescent + width / 2
-                oy_pos = ydescent + height / 2
-                imgbox = OffsetImage(thumb_arr, zoom=0.8)
-                ab     = AnnotationBbox(
-                    imgbox, (ox_pos, oy_pos),
-                    xycoords=trans, frameon=False
-                )
-                return [ab]
+            class _LogoHandler(lh.HandlerBase):
+                def create_artists(self, legend, orig_handle, xd, yd, w, h, fontsize, trans):
+                    imgbox = OffsetImage(thumb, zoom=0.8)
+                    ab = AnnotationBbox(imgbox, (xd + w / 2, yd + h / 2),
+                                        xycoords=trans, frameon=False)
+                    return [ab]
 
-        logo_handle = LogoHandler([], [], label="MTR Station")
-        legend_handles.append(logo_handle)
-        handler_map = {LogoHandler: HandlerLogo()}
-
+            legend_handles.append(_LogoHandle([], [], label="MTR Station"))
+            handler_map = {_LogoHandle: _LogoHandler()}
+        except Exception:
+            legend_handles.append(
+                mlines.Line2D([], [], marker="o", linestyle="None",
+                              markerfacecolor="#ED1D24", markeredgecolor="white",
+                              markeredgewidth=2, markersize=10, label="MTR Station"))
     else:
         legend_handles.append(
-            mlines.Line2D(
-                [], [], marker='o', linestyle='None',
-                markerfacecolor='#ED1D24',
-                markeredgecolor='white',
-                markeredgewidth=2,
-                markersize=10,
-                label="MTR Station"
-            )
+            mlines.Line2D([], [], marker="o", linestyle="None",
+                          markerfacecolor="#ED1D24", markeredgecolor="white",
+                          markeredgewidth=2, markersize=10, label="MTR Station"))
+
+    if legend_handles:
+        ax.legend(
+            handles=legend_handles,
+            handler_map=handler_map if handler_map else None,
+            loc="lower left",
+            bbox_to_anchor=(0.02, 0.02),   # inside map, bottom-left
+            ncol=1,                         # single column — matches context.py
+            framealpha=0.95,
+            edgecolor="none",
+            fontsize=8.5,
+            labelspacing=0.4,
+            handlelength=1.6,
+            borderpad=0.6,
         )
-        handler_map = {}
 
-    legend = ax.legend(
-        handles=legend_handles,
-        handler_map=handler_map if (MTR_LOGO_LOADED and _mtr_img is not None) else None,
-        loc="lower left",
-        bbox_to_anchor=(0.02, 0.02),
-        frameon=True,
-        facecolor="white",
-        edgecolor="black",
-        fontsize=10,
-        title_fontsize=10,
-        labelspacing=0.4,
-        handlelength=1.8,
-        handleheight=1.0,
-        borderpad=0.6,
-        title="Legend"
-    )
-    legend.get_frame().set_linewidth(2)
-
-    # --------------------------------------------------------
-    # TITLE
-    # --------------------------------------------------------
-
-    ax.set_title(
-        f"SITE ANALYSIS – Transportation ({data_type} {value})",
-        fontsize=18, weight="bold"
-    )
-
+    ax.set_title(f"SITE ANALYSIS – Transportation ({data_type} {value})",
+                 fontsize=18, weight="bold")
     ax.set_axis_off()
 
-    buffer = BytesIO()
-    plt.savefig(buffer, format="png", dpi=200,
+    buf = BytesIO()
+    fig.subplots_adjust(bottom=0.0)   # no bottom reserve needed — legend is inside map
+    plt.savefig(buf, format="png", dpi=150,
                 bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
     gc.collect()
-
-    return buffer
+    buf.seek(0)
+    log.info("[transport] Done.")
+    return buf
