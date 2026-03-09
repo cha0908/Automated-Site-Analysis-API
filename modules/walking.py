@@ -233,7 +233,7 @@ def generate_walking(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=500)
+    plt.savefig(buf, format="png", dpi=130)
     plt.close(fig)
     gc.collect()
     return buf
