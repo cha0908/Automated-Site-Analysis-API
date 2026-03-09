@@ -240,3 +240,4 @@ def generate_walking(data_type: str, value: str,
     plt.close(fig)
     gc.collect()
     return buf
+                         
