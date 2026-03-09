@@ -185,7 +185,7 @@ def generate_walking(data_type: str, value: str,
                    zoom=zoom_level, alpha=1)
 
     # ── Roads AFTER basemap — light overlay so basemap remains readable ────────
-    roads.plot(ax=ax, linewidth=0.5, color="#888888", alpha=0.35, zorder=2)
+    roads.plot(ax=ax, linewidth=0.9, color="#888888", alpha=0.55, zorder=2)
     del roads
     gc.collect()
 
