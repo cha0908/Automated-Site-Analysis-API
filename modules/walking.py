@@ -60,7 +60,6 @@ def _add_mtr_icon(ax, x, y, size=0.04, zorder=15):
                 zorder=zorder+1, transform=ax.transData)
 
 
-# ── PATCHED: added lon/lat params ─────────────────────────────
 def generate_walking(data_type: str, value: str,
                      max_walk_minutes: int = 5,
                      lon: float = None, lat: float = None,
@@ -77,7 +76,7 @@ def generate_walking(data_type: str, value: str,
     MAP_EXTENT = cfg["map_extent"]
     MAP_EXTENT_X = MAP_EXTENT * (992 / 737)
     MAP_EXTENT_Y = MAP_EXTENT
-    # ── PATCHED: pass lon/lat through ─────────────────────────
+
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
 
     lot_gdf = get_lot_boundary(lon, lat, data_type, extents)
@@ -120,7 +119,6 @@ def generate_walking(data_type: str, value: str,
     site_wgs  = gpd.GeoSeries([site_point], crs=3857).to_crs(4326).iloc[0]
     site_node = ox.distance.nearest_nodes(G_walk, site_wgs.x, site_wgs.y)
 
-    # Try progressively larger radii — ADDRESS coords (road midpoints) may be imprecise
     station_fetch_r = max(int(cfg["shade_r"] * 1.5), 1200)
     if data_type.upper() == "ADDRESS":
         station_fetch_r = max(station_fetch_r, 2000)
@@ -173,19 +171,31 @@ def generate_walking(data_type: str, value: str,
             "name": row["station_name"]
         })
 
-    # ── Plot — use lower DPI to save RAM during rendering ─────
-    fig, ax = plt.subplots(figsize=(20,15)) # slightly smaller figure
+    # ── Plot ───────────────────────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(20, 15))
 
-    roads.plot(ax=ax, linewidth=0.25, color="#8a8a8a", alpha=0.4)
+    ax.set_xlim(site_point.x - MAP_EXTENT_X, site_point.x + MAP_EXTENT_X)
+    ax.set_ylim(site_point.y - MAP_EXTENT_Y, site_point.y + MAP_EXTENT_Y)
+    ax.set_aspect("equal")
+    ax.autoscale(False)
+
+    # ── Basemap FIRST so everything else renders on top ────────────────────────
+    zoom_level = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)
+    cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
+                   zoom=zoom_level, alpha=1)
+
+    # ── Roads AFTER basemap — light overlay so basemap remains readable ────────
+    roads.plot(ax=ax, linewidth=0.9, color="#888888", alpha=0.55, zorder=2)
     del roads
     gc.collect()
 
+    # ── Isochrone shade + rings ────────────────────────────────────────────────
     gpd.GeoSeries([site_point.buffer(cfg["shade_r"])], crs=3857).plot(
-        ax=ax, color="#2aa9ff", alpha=0.15)
+        ax=ax, color="#2aa9ff", alpha=0.15, zorder=3)
 
     for ring_r, ring_lbl in cfg["rings"]:
         gpd.GeoSeries([site_point.buffer(ring_r)], crs=3857).boundary.plot(
-            ax=ax, linestyle=(0, (4, 3)), linewidth=2, color="#2aa9ff")
+            ax=ax, linestyle=(0, (4, 3)), linewidth=2, color="#2aa9ff", zorder=4)
         ax.text(site_point.x + ring_r + 30, site_point.y,
                 ring_lbl, fontsize=10, color="black", weight="bold",
                 va="center", zorder=10, clip_on=False)
@@ -214,17 +224,10 @@ def generate_walking(data_type: str, value: str,
                 fontsize=11, weight="bold", color="black",
                 ha="center", va="center", zorder=9)
 
-    site_gdf.plot(ax=ax, facecolor="red", edgecolor="none")
+    site_gdf.plot(ax=ax, facecolor="red", edgecolor="none", zorder=11)
     ax.text(site_point.x, site_point.y - (MAP_EXTENT * 0.06),
-            "SITE", color="black", weight="bold", ha="center", fontsize=11)
-
-    ax.set_xlim(site_point.x - MAP_EXTENT_X, site_point.x + MAP_EXTENT_X)
-    ax.set_ylim(site_point.y - MAP_EXTENT_Y, site_point.y + MAP_EXTENT_Y)
-    ax.set_aspect("equal")
-
-    zoom_level = 16 if MAP_EXTENT <= 650 else (15 if MAP_EXTENT <= 950 else 14)
-    cx.add_basemap(ax, source=cx.providers.CartoDB.PositronNoLabels,
-                   zoom=zoom_level, alpha=1)
+            "SITE", color="black", weight="bold", ha="center",
+            fontsize=11, zorder=12)
 
     ax.set_title(f"Walking Accessibility ({max_walk_minutes} min)"
                  f" - {data_type} {value}",
@@ -233,7 +236,8 @@ def generate_walking(data_type: str, value: str,
 
     buf = BytesIO()
     plt.tight_layout()
-    plt.savefig(buf, format="png", dpi=500)
+    plt.savefig(buf, format="png", dpi=130)
     plt.close(fig)
     gc.collect()
     return buf
+                         
