@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from io import BytesIO
 import geopandas as gpd
+import osmnx as ox
 import os
 import time
 import asyncio
@@ -22,6 +23,11 @@ from reportlab.lib import utils
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import Response as _FResponse
+
+# ── OSMnx / Overpass (global) ──────────────────────────────────────────────
+# Set a single Overpass endpoint for all analyses (context/view/noise/etc.).
+# Override via env var OVERPASS_URL if needed.
+# ox.settings.overpass_url = os.getenv("OVERPASS_URL", "https://overpass.kumi.systems/api/")
 
 from modules.walking import generate_walking
 from modules.driving import generate_driving

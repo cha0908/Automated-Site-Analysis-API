@@ -92,15 +92,42 @@ def _infer_site_type(zone):
 
 
 def _label_rules(site_type):
-    base = {
-        "amenity": ["school", "college", "university", "hospital", "kindergarten"],
-        "leisure": ["park"],
-        "place":   ["neighbourhood", "suburb"],
-        "building": ["residential", "apartments"],
-    }
+    """
+    OSM tag rules used to fetch *label candidates* (named features).
+
+    Spec:
+    - RESIDENTIAL: show residential + parks + schools (only site type that gets parks/schools)
+    - COMMERCIAL: show malls + offices
+    - Everything else: show only its own type
+    """
+    if site_type == "RESIDENTIAL":
+        return {
+            "building": ["residential"],
+            "leisure": ["park"],
+            "amenity": ["school", "college", "university"],
+            "landuse": ["residential"],
+        }
+
     if site_type == "COMMERCIAL":
-        base["railway"] = ["station"]
-    return base
+        return {
+            "shop": ["mall"],
+            "office": ["association", "company"],
+        }
+
+    if site_type == "INDUSTRIAL":
+        return {
+            "landuse": ["industrial"],
+        }
+
+    if site_type == "HOTEL":
+        return {
+            "tourism": ["hotel"],
+        }
+
+    # MIXED and other fallbacks: keep the query lean; mixed zones vary widely.
+    return {
+        "place": ["neighbourhood", "suburb"],
+    }
 
 
 def _empty_gdf():
@@ -175,15 +202,20 @@ def generate_context(
     lot_ids = lot_ids or []
     extents = extents or []
 
+    # Use request-selected radius (allowed: 600/800/1000) to set BOTH:
+    # - visible map extent (square half-size in metres)
+    # - OSM fetch radii, so we don't fetch far beyond what is shown
+    scope_r = int(radius_m) if radius_m is not None else MAP_HALF_SIZE
+
     # 1. Resolve
     lon, lat = resolve_location(data_type, value, lon, lat, lot_ids, extents)
     log.info("context: resolved %.6f, %.6f", lon, lat)
     site_pt = gpd.GeoSeries([Point(lon, lat)], crs=4326).to_crs(3857).iloc[0]
 
-    xmin = site_pt.x - MAP_HALF_SIZE
-    xmax = site_pt.x + MAP_HALF_SIZE
-    ymin = site_pt.y - MAP_HALF_SIZE
-    ymax = site_pt.y + MAP_HALF_SIZE
+    xmin = site_pt.x - scope_r
+    xmax = site_pt.x + scope_r
+    ymin = site_pt.y - scope_r
+    ymax = site_pt.y + scope_r
 
     # 2. OZP zoning
     hits = zone_data[zone_data.contains(site_pt)]
@@ -201,9 +233,19 @@ def generate_context(
 
     # 3. Landuse
     log.info("context: fetching landuse")
-    polys_raw = _safe_osm(lat, lon, FETCH_RADIUS,
-                          {"landuse": True, "leisure": True, "amenity": True},
-                          "landuse")
+    # Keep this query tight: we only need a few landuse/leisure/amenity values
+    # for the background layers (residential/industrial/commercial, parks, schools).
+    polys_raw = _safe_osm(
+        lat,
+        lon,
+        scope_r,
+        {
+            "landuse": ["residential", "industrial", "commercial"],
+            "leisure": ["park"],
+            "amenity": ["school", "college", "university"],
+        },
+        "landuse",
+    )
     polys = _clip_to_map(polys_raw, xmin, ymin, xmax, ymax)
     del polys_raw; gc.collect()
 
@@ -229,7 +271,7 @@ def generate_context(
 
     # 5. MTR stations
     log.info("context: fetching stations")
-    stations = _safe_osm(lat, lon, MTR_RADIUS_M, {"railway": "station"}, "stations")
+    stations = _safe_osm(lat, lon, scope_r, {"railway": "station"}, "stations")
     if not stations.empty:
         ne = stations.get("name:en")
         nz = stations.get("name")
@@ -239,7 +281,7 @@ def generate_context(
         stations["_cy"] = stations.geometry.centroid.y
         stations["_d"]  = stations.geometry.centroid.distance(site_pt)
         stations = (stations.dropna(subset=["_name"])
-                             .sort_values("_d").head(4))
+                             .sort_values("_d").head(5))
         stations = stations[
             (stations["_cx"].between(xmin, xmax)) &
             (stations["_cy"].between(ymin, ymax))
@@ -247,26 +289,56 @@ def generate_context(
 
     # 6. Bus stops
     log.info("context: fetching bus stops")
-    bus_raw   = _safe_osm(lat, lon, BUS_FETCH_R, {"highway": "bus_stop"}, "bus_stops")
+    bus_raw   = _safe_osm(lat, lon, scope_r, {"highway": "bus_stop"}, "bus_stops")
     bus_stops = _spread_bus_stops(bus_raw, site_pt, BUS_COUNT, min_dist_m=150)
     del bus_raw; gc.collect()
     log.info("context: %d bus stops selected", len(bus_stops))
 
     # 7. Labels
     log.info("context: fetching labels")
-    labels = _safe_osm(lat, lon, LABEL_RADIUS, _label_rules(s_type), "labels")
+    labels = _safe_osm(lat, lon, scope_r, _label_rules(s_type), "labels")
     if not labels.empty:
         ne = labels.get("name:en")
         nz = labels.get("name")
         labels["label"] = (ne.fillna(nz) if (ne is not None and nz is not None)
                            else (nz if nz is not None else None))
-        labels = labels.dropna(subset=["label"]).drop_duplicates("label").head(24)
+        # before = len(labels)
+        # labels = labels.dropna(subset=["label"])
+        # after_dropna = len(labels)
+        # labels = labels.drop_duplicates("label")
+        # after_dedup = len(labels)
+        # labels = labels.head(50)
+        # log.info(
+        #     "context: labels filtered: raw=%d dropna=%d dedup=%d capped=%d",
+        #     before, after_dropna, after_dedup, len(labels),
+        # )
+        # # Show which names were detected (and what tag caused it) for debugging.
+        # try:
+        #     def _pick_tag(r):
+        #         for k in ("shop", "office", "building", "amenity", "leisure", "tourism", "landuse", "place"):
+        #             v = r.get(k)
+        #             if v is not None and v != "":
+        #                 return f"{k}={v}"
+        #         return "n/a"
 
+        #     sample = []
+        #     for idx, row in labels.iterrows():
+        #         osmid = None
+        #         try:
+        #             osmid = idx[1] if isinstance(idx, tuple) and len(idx) > 1 else idx
+        #         except Exception:
+        #             osmid = idx
+        #         sample.append(f"{row.get('label')} [{_pick_tag(row)} id={osmid}]")
+        #     log.info("context: label candidates (capped): %s", " | ".join(sample))
+        # except Exception as e:
+        #     log.debug("context: label candidate log failed (%s)", e)
+        labels = labels.dropna(subset=["label"]).drop_duplicates("label").head(50)
     # ── FIGURE ────────────────────────────────────────────────────────────────
     log.info("context: building figure zoom=%d figsize=%d dpi=%d",
              BASEMAP_ZOOM, FIG_SIZE, FIG_DPI)
 
-    fig, ax = plt.subplots(figsize=(FIG_SIZE, FIG_SIZE))
+    # Use a slightly wider rectangular figure so labels have more horizontal room.
+    fig, ax = plt.subplots(figsize=(14, 12))
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymin, ymax)
     ax.set_aspect("equal")
@@ -351,22 +423,45 @@ def generate_context(
                (25,-25),(-25,-25),(0,50),(50,0),(-50,0),(0,-50)]
     placed = []
     if not labels.empty and "label" in labels.columns:
+        # Keep labels away from the map edge so they are not half cut off.
+        edge_margin = scope_r * 0.05
         for i, (_, lrow) in enumerate(labels.iterrows()):
             try:
                 p = lrow.geometry.representative_point()
             except Exception:
+                log.debug("context: label skip (bad geometry): %s", lrow.get("label"))
                 continue
-            if p.distance(site_pt) < 140:
-                continue
+
             if any(p.distance(pp) < 120 for pp in placed):
+                log.debug("context: label skip (too close to other label): %s", lrow.get("label"))
                 continue
+
             dx, dy = offsets[i % len(offsets)]
-            ax.text(p.x+dx, p.y+dy, _wrap(lrow["label"], 18),
-                    fontsize=9, ha="center", va="center",
-                    bbox=dict(facecolor="white", edgecolor="none",
-                              alpha=0.85, boxstyle="round,pad=0.25"),
-                    zorder=12, clip_on=True)
+            tx = p.x + dx
+            ty = p.y + dy
+
+            # Skip labels whose anchor point would fall too close to or beyond
+            # the visible frame, which would cause them to be partially cut off.
+            if not (xmin + edge_margin <= tx <= xmax - edge_margin and
+                    ymin + edge_margin <= ty <= ymax - edge_margin):
+                log.debug("context: label skip (near edge): %s", lrow.get("label"))
+                continue
+
+            # Draw label text directly on the map (no white box), slightly larger.
+            ax.text(
+                tx,
+                ty,
+                _wrap(lrow["label"], 18),
+                fontsize=11,
+                ha="center",
+                va="center",
+                color="black",
+                zorder=12,
+                fontweight="semibold",
+                clip_on=True,
+            )
             placed.append(p)
+        log.info("context: labels placed: %d / %d", len(placed), len(labels))
 
     # Info box
     ax.text(0.015, 0.985,
