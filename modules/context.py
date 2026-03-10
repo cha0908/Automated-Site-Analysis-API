@@ -93,9 +93,10 @@ def _infer_site_type(zone):
 
 def _label_rules(site_type):
     base = {
-        "amenity": ["school", "college", "university", "hospital"],
+        "amenity": ["school", "college", "university", "hospital", "kindergarten"],
         "leisure": ["park"],
         "place":   ["neighbourhood", "suburb"],
+        "building": ["residential", "apartments"],
     }
     if site_type == "COMMERCIAL":
         base["railway"] = ["station"]
